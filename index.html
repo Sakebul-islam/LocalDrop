@@ -214,17 +214,41 @@
             ></i>
             <h3 class="text-xl font-semibold mb-2">Send a File</h3>
             <p class="text-slate-400 text-sm mb-6">
-              Click to browse or drag and drop a file here.<br />Transfers
-              directly P2P.
+              Unlimited size direct P2P transfer.
             </p>
 
             <input type="file" id="file-input" class="hidden" />
             <button
               onclick="document.getElementById('file-input').click()"
-              class="bg-slate-700 hover:bg-slate-600 border border-slate-500 text-white font-semibold py-3 px-8 rounded-xl transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2 mx-auto"
+              class="bg-slate-700 hover:bg-slate-600 border border-slate-500 text-white font-semibold py-3 px-8 rounded-xl transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2 mx-auto relative z-10"
             >
               <i class="ph ph-folder-open text-xl"></i> Select File
             </button>
+          </div>
+
+          <!-- Live Progress Bar -->
+          <div
+            id="progress-ui"
+            class="hidden w-full mt-8 bg-slate-800 p-5 rounded-2xl border border-slate-600 shadow-inner relative z-10"
+          >
+            <div class="flex justify-between text-sm mb-3 font-medium">
+              <span
+                id="progress-label"
+                class="text-sky-400 flex items-center gap-2"
+                ><i class="ph ph-spinner animate-spin"></i>
+                Transferring...</span
+              >
+              <span id="progress-percent" class="text-white font-mono">0%</span>
+            </div>
+            <div
+              class="w-full bg-slate-900 rounded-full h-3 overflow-hidden border border-slate-700"
+            >
+              <div
+                id="progress-bar"
+                class="bg-sky-500 h-full rounded-full transition-all duration-75 ease-linear"
+                style="width: 0%"
+              ></div>
+            </div>
           </div>
         </div>
 
@@ -245,6 +269,46 @@
         </div>
       </div>
     </main>
+
+    <!-- Incoming File Modal Overlay -->
+    <div
+      id="incoming-modal"
+      class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-md p-4 transition-opacity"
+    >
+      <div
+        class="glass-panel p-8 rounded-3xl w-full max-w-sm text-center border border-slate-600 shadow-2xl"
+      >
+        <div
+          class="w-20 h-20 bg-sky-500/20 text-sky-400 rounded-full flex items-center justify-center mx-auto mb-5 border border-sky-500/30"
+        >
+          <i class="ph ph-file-arrow-down text-4xl animate-bounce"></i>
+        </div>
+        <h3 class="text-2xl font-bold mb-2 text-white">Incoming File</h3>
+        <p
+          id="incoming-filename"
+          class="text-slate-200 font-medium truncate mb-1 text-lg"
+        >
+          filename.mp4
+        </p>
+        <p id="incoming-size" class="text-sm text-slate-400 font-mono mb-8">
+          3.2 GB
+        </p>
+        <div class="flex gap-4">
+          <button
+            id="decline-btn"
+            class="flex-1 bg-slate-800 hover:bg-slate-700 text-white font-semibold py-3 rounded-xl transition-all border border-slate-600 active:scale-95"
+          >
+            Decline
+          </button>
+          <button
+            id="accept-btn"
+            class="flex-1 bg-sky-500 hover:bg-sky-400 text-slate-900 font-bold py-3 rounded-xl transition-all shadow-lg shadow-sky-500/20 active:scale-95"
+          >
+            Accept File
+          </button>
+        </div>
+      </div>
+    </div>
 
     <div
       id="toast-container"
@@ -276,12 +340,22 @@
       const fileInput = document.getElementById("file-input");
       const transferLogs = document.getElementById("transfer-logs");
 
+      const progressUi = document.getElementById("progress-ui");
+      const progressBar = document.getElementById("progress-bar");
+      const progressPercent = document.getElementById("progress-percent");
+      const progressLabel = document.getElementById("progress-label");
+
+      const incomingModal = document.getElementById("incoming-modal");
+      const incomingFilename = document.getElementById("incoming-filename");
+      const incomingSize = document.getElementById("incoming-size");
+      const acceptBtn = document.getElementById("accept-btn");
+      const declineBtn = document.getElementById("decline-btn");
+
       let myId = generateShortId();
       let activeConnection = null;
       let nativePC = null; // Used only in Canvas Mode
       let connectionTimeout = null;
 
-      // Detect if we are inside the Canvas Sandbox or downloaded locally
       const isCanvas = typeof __firebase_config !== "undefined";
 
       /* --- UI Helper Functions --- */
@@ -301,7 +375,6 @@
 
         toast.className = `flex items-center gap-3 px-4 py-3 rounded-xl border shadow-xl transform transition-all duration-300 translate-y-10 opacity-0 ${bgClass}`;
         toast.innerHTML = `${icon} <span class="text-sm font-medium">${message}</span>`;
-
         container.appendChild(toast);
 
         requestAnimationFrame(() =>
@@ -323,7 +396,8 @@
       }
 
       function resetUI() {
-        if (activeConnection) activeConnection.close();
+        if (activeConnection && activeConnection.close)
+          activeConnection.close();
         if (nativePC) nativePC.close();
         activeConnection = null;
         nativePC = null;
@@ -336,6 +410,8 @@
         connectedPeerIdDisplay.innerText = "---";
         connectBtn.disabled = false;
         connectBtn.innerHTML = 'Connect <i class="ph ph-arrow-right-bold"></i>';
+        hideProgress();
+        incomingModal.classList.add("hidden");
       }
 
       function formatBytes(bytes) {
@@ -359,7 +435,7 @@
 
         let actionButton = downloadUrl
           ? `<a href="${downloadUrl}" download="${name}" class="bg-emerald-500 hover:bg-emerald-400 text-slate-900 px-3 py-1 text-xs font-bold rounded-md transition-colors shadow-sm">Download</a>`
-          : "";
+          : '<span class="text-xs text-slate-500 font-bold bg-slate-800 px-2 py-1 rounded">Saved to Disk</span>';
 
         logItem.innerHTML = `
                 <div class="flex items-center gap-3 overflow-hidden">
@@ -376,94 +452,184 @@
         transferLogs.prepend(logItem);
       }
 
-      /* --- Unified File Transfer Data Handlers --- */
-      const CHUNK_SIZE = 16384; // 16KB WebRTC chunk limit
-      let receiveBuffer = [];
+      function updateProgress(current, total, label) {
+        progressUi.classList.remove("hidden");
+        const percentage = Math.min(100, Math.round((current / total) * 100));
+        progressBar.style.width = `${percentage}%`;
+        progressPercent.innerText = `${percentage}%`;
+        progressLabel.innerHTML = `<i class="ph ph-spinner animate-spin"></i> ${label}...`;
+      }
+
+      function hideProgress() {
+        progressUi.classList.add("hidden");
+        progressBar.style.width = "0%";
+        progressPercent.innerText = "0%";
+      }
+
+      /* --- Big Data Unified Transfer Architecture --- */
+
+      // Use raw RTCDataChannel directly to bypass overhead and access buffers
+      function sendDirect(data) {
+        const rtcChannel = activeConnection.dataChannel || activeConnection;
+        rtcChannel.send(data);
+      }
+
+      const CHUNK_SIZE = 64 * 1024; // 64KB for optimal network throughput
+
+      // Sender State
+      let sendFile = null;
+      let sendOffset = 0;
+
+      // Receiver State
       let receiveMeta = null;
+      let receiveStream = null;
+      let receiveBuffer = [];
+      let receivedSize = 0;
 
-      // Sending Files
+      // 1. Sender Selects File -> Send Header Request
       fileInput.addEventListener("change", () => {
-        const file = fileInput.files[0];
-        if (!file || !activeConnection) return;
-
-        showToast(`Sending ${file.name}...`, "info");
-        logTransfer("Sent", file.name, file.size);
-
-        const isPeerJS = !!activeConnection.dataChannel;
-
-        if (isPeerJS) {
-          // Engine 2 (PeerJS) handles chunking automatically under the hood
-          activeConnection.send({
-            type: "file",
-            file: file,
-            name: file.name,
-            size: file.size,
-            mime: file.type,
-          });
-        } else {
-          // Engine 1 (Canvas Native RTC) Requires manual chunking
-          activeConnection.send(
-            JSON.stringify({
-              type: "header",
-              name: file.name,
-              size: file.size,
-              mime: file.type,
-            }),
-          );
-          const reader = new FileReader();
-          let offset = 0;
-
-          reader.onload = (e) => {
-            activeConnection.send(e.target.result); // Send ArrayBuffer chunk
-            offset += e.target.result.byteLength;
-            if (offset < file.size) {
-              readSlice(offset);
-            } else {
-              activeConnection.send(JSON.stringify({ type: "end" }));
-            }
-          };
-          const readSlice = (o) =>
-            reader.readAsArrayBuffer(file.slice(o, o + CHUNK_SIZE));
-          readSlice(0);
-        }
+        sendFile = fileInput.files[0];
+        if (!sendFile || !activeConnection) return;
+        showToast(`Awaiting permission to send ${sendFile.name}...`, "info");
+        sendDirect(
+          JSON.stringify({
+            type: "header",
+            name: sendFile.name,
+            size: sendFile.size,
+            mime: sendFile.type,
+          }),
+        );
         fileInput.value = "";
       });
 
-      // Receiving Files
-      function handleIncomingData(data) {
-        if (data.type === "file") {
-          // Engine 2 (PeerJS) Payload
-          const blob = new Blob([data.file], { type: data.mime });
-          const url = URL.createObjectURL(blob);
-          logTransfer("Received", data.name, data.size, url);
-          showToast(`Received file: ${data.name}`, "success");
-        } else if (typeof data === "string") {
-          // Engine 1 (Canvas Native RTC) Payload Metadata
+      // 2. Sender streams chunks with Backpressure Management
+      function startSendingChunks() {
+        sendOffset = 0;
+        const rtcChannel = activeConnection.dataChannel || activeConnection;
+        rtcChannel.bufferedAmountLowThreshold = 1024 * 1024; // 1MB threshold
+
+        const fileReader = new FileReader();
+
+        function readNextChunk() {
+          if (sendOffset >= sendFile.size) {
+            sendDirect(JSON.stringify({ type: "end" }));
+            showToast("Transfer complete!", "success");
+            logTransfer("Sent", sendFile.name, sendFile.size);
+            hideProgress();
+            sendFile = null;
+            return;
+          }
+          const slice = sendFile.slice(sendOffset, sendOffset + CHUNK_SIZE);
+          fileReader.readAsArrayBuffer(slice);
+        }
+
+        fileReader.onload = (e) => {
+          sendDirect(e.target.result); // Push binary to WebRTC
+          sendOffset += e.target.result.byteLength;
+          updateProgress(sendOffset, sendFile.size, "Sending");
+
+          // BACKPRESSURE: Pause reading from disk if WebRTC queue is too full (> 2MB)
+          if (rtcChannel.bufferedAmount > 2 * 1024 * 1024) {
+            rtcChannel.onbufferedamountlow = () => {
+              rtcChannel.onbufferedamountlow = null;
+              readNextChunk();
+            };
+          } else {
+            readNextChunk();
+          }
+        };
+        readNextChunk();
+      }
+
+      // 3. Central Incoming Data Router
+      async function handleIncomingData(data) {
+        if (typeof data === "string") {
           try {
             const msg = JSON.parse(data);
+
             if (msg.type === "header") {
               receiveMeta = msg;
-              receiveBuffer = [];
+              incomingFilename.innerText = msg.name;
+              incomingSize.innerText = formatBytes(msg.size);
+              incomingModal.classList.remove("hidden");
+            } else if (msg.type === "accept") {
+              showToast("Request accepted! Sending data...", "success");
+              startSendingChunks();
+            } else if (msg.type === "decline") {
+              showToast("Peer declined the file.", "error");
+              sendFile = null;
             } else if (msg.type === "end") {
-              const blob = new Blob(receiveBuffer, { type: receiveMeta.mime });
-              const url = URL.createObjectURL(blob);
-              logTransfer("Received", receiveMeta.name, receiveMeta.size, url);
-              showToast(`Received file: ${receiveMeta.name}`, "success");
+              if (receiveStream) {
+                await receiveStream.close(); // Finish writing to hard drive
+                logTransfer("Received", receiveMeta.name, receiveMeta.size);
+                showToast(`Saved ${receiveMeta.name}!`, "success");
+              } else {
+                // Fallback for Safari/Firefox
+                const blob = new Blob(receiveBuffer, {
+                  type: receiveMeta.mime,
+                });
+                const url = URL.createObjectURL(blob);
+                logTransfer(
+                  "Received",
+                  receiveMeta.name,
+                  receiveMeta.size,
+                  url,
+                );
+              }
+              hideProgress();
               receiveMeta = null;
               receiveBuffer = [];
+              receiveStream = null;
             }
           } catch (e) {}
-        } else if (data instanceof ArrayBuffer || data instanceof Blob) {
-          // Engine 1 (Canvas Native RTC) Payload Chunk
-          receiveBuffer.push(data);
+        } else {
+          // Incoming Binary Chunk
+          const buffer = data instanceof Blob ? await data.arrayBuffer() : data;
+          receivedSize += buffer.byteLength;
+          updateProgress(receivedSize, receiveMeta.size, "Receiving");
+
+          if (receiveStream) {
+            await receiveStream.write(buffer); // Stream directly to Hard Drive
+          } else {
+            receiveBuffer.push(buffer); // Fallback to RAM
+          }
         }
       }
 
-      /* --- Engine Initializers --- */
+      // 4. Receiver Modal Buttons
+      declineBtn.onclick = () => {
+        incomingModal.classList.add("hidden");
+        sendDirect(JSON.stringify({ type: "decline" }));
+        receiveMeta = null;
+      };
 
-      // Engine 1: Canvas Mode (Bypasses WebSocket limits using internal Firestore Signaling)
+      acceptBtn.onclick = async () => {
+        incomingModal.classList.add("hidden");
+        try {
+          // Request direct file save access
+          if ("showSaveFilePicker" in window) {
+            const handle = await window.showSaveFilePicker({
+              suggestedName: receiveMeta.name,
+            });
+            receiveStream = await handle.createWritable();
+          } else {
+            receiveBuffer = []; // Fallback memory array
+            showToast(
+              "Streaming to disk not supported on this browser. Falling back to RAM.",
+              "info",
+            );
+          }
+          receivedSize = 0;
+          sendDirect(JSON.stringify({ type: "accept" }));
+        } catch (e) {
+          // User cancelled the save dialog
+          sendDirect(JSON.stringify({ type: "decline" }));
+        }
+      };
+
+      /* --- WebRTC Initializers (Unchanged Core, just binds new raw handler) --- */
+
       async function initCanvasWebRTC() {
-        // Dynamically import Firebase ONLY if in Canvas
         const { initializeApp } =
           await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js");
         const {
@@ -495,18 +661,12 @@
         let isHost = true;
         let processedCandidates = new Set();
 
-        if (
-          typeof __initial_auth_token !== "undefined" &&
-          __initial_auth_token
-        ) {
+        if (typeof __initial_auth_token !== "undefined" && __initial_auth_token)
           await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
+        else await signInAnonymously(auth);
 
         onAuthStateChanged(auth, async (user) => {
           if (!user) return;
-
           statusDot.classList.replace("bg-amber-400", "bg-emerald-400");
           statusDot.classList.remove("animate-pulse");
           statusText.innerText = "Online (Canvas Network)";
@@ -535,16 +695,13 @@
             const data = snapshot.data();
             if (!data) return;
 
-            // Host receives offer
             if (data.guestOffer && !data.hostAnswer && !nativePC) {
               isHost = true;
               setupNativePC(roomRef, isHost, updateDoc, arrayUnion);
-
               nativePC.ondatachannel = (event) => {
                 activeConnection = event.channel;
                 setupDataChannel(activeConnection, "Guest");
               };
-
               await nativePC.setRemoteDescription(
                 new RTCSessionDescription(JSON.parse(data.guestOffer)),
               );
@@ -553,7 +710,6 @@
               await updateDoc(roomRef, { hostAnswer: JSON.stringify(answer) });
             }
 
-            // Process ICE Candidates
             if (
               nativePC &&
               nativePC.remoteDescription &&
@@ -585,7 +741,6 @@
             targetId,
           );
           const snap = await getDoc(roomRef);
-
           if (!snap.exists()) {
             showToast("Device not found", "error");
             resetUI();
@@ -605,13 +760,10 @@
           onSnapshot(roomRef, async (snapshot) => {
             const data = snapshot.data();
             if (!data) return;
-
-            if (data.hostAnswer && !nativePC.currentRemoteDescription) {
+            if (data.hostAnswer && !nativePC.currentRemoteDescription)
               await nativePC.setRemoteDescription(
                 new RTCSessionDescription(JSON.parse(data.hostAnswer)),
               );
-            }
-
             if (nativePC && nativePC.remoteDescription && data.hostCandidates) {
               for (const cand of data.hostCandidates) {
                 if (!processedCandidates.has(cand)) {
@@ -630,13 +782,12 @@
             iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
           });
           nativePC.onicecandidate = (event) => {
-            if (event.candidate) {
+            if (event.candidate)
               uDoc(rRef, {
                 [hostFlag ? "hostCandidates" : "guestCandidates"]: aUnion(
                   JSON.stringify(event.candidate.toJSON()),
                 ),
               });
-            }
           };
         }
 
@@ -651,7 +802,6 @@
         }
       }
 
-      // Engine 2: Local File Mode (Uses PeerJS when downloaded locally)
       function initLocalWebRTC() {
         const peer = new Peer(myId, {
           config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
@@ -669,12 +819,13 @@
           conn.on("open", () => {
             clearTimeout(connectionTimeout);
             showTransferUI(conn.peer);
+            // Bypass PeerJS wrapper for raw performance
+            conn.dataChannel.onmessage = (e) => handleIncomingData(e.data);
           });
-          conn.on("data", handleIncomingData);
           conn.on("close", resetUI);
         });
 
-        peer.on("error", (err) => {
+        peer.on("error", () => {
           showToast("Connection Error. Check network.", "error");
           resetUI();
         });
@@ -684,13 +835,13 @@
           activeConnection.on("open", () => {
             clearTimeout(connectionTimeout);
             showTransferUI(targetId);
+            activeConnection.dataChannel.onmessage = (e) =>
+              handleIncomingData(e.data);
           });
-          activeConnection.on("data", handleIncomingData);
           activeConnection.on("close", resetUI);
         };
       }
 
-      /* --- Global Button Listeners --- */
       connectBtn.addEventListener("click", () => {
         const targetId = targetIdInput.value.trim().toUpperCase();
         if (!targetId || targetId === myId) {
@@ -712,18 +863,13 @@
           }
         }, 15000);
 
-        // Calls either the Canvas Mode or Local Mode connector
         window.connectToPeer(targetId);
       });
 
       disconnectBtn.addEventListener("click", resetUI);
 
-      /* --- Boot Sequence --- */
-      if (isCanvas) {
-        initCanvasWebRTC();
-      } else {
-        initLocalWebRTC();
-      }
+      if (isCanvas) initCanvasWebRTC();
+      else initLocalWebRTC();
     </script>
   </body>
 </html>
