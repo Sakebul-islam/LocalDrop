@@ -1,406 +1,367 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>LocalDrop - P2P File Transfer</title>
-    
+
     <!-- Tailwind CSS for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
-    
-    <!-- PeerJS for WebRTC connection and free signaling -->
+
+    <!-- PeerJS for WebRTC fallback (used when downloaded locally) -->
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
-    
+
     <!-- Phosphor Icons -->
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
 
     <!-- Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
 
     <style>
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #0f172a; /* slate-900 */
-            color: #f8fafc;
-            overflow-x: hidden;
-        }
+      body {
+        font-family: "Inter", sans-serif;
+        background-color: #0f172a; /* slate-900 */
+        color: #f8fafc;
+        overflow-x: hidden;
+      }
 
-        /* Radar Pulse Animation */
-        .radar-container {
-            position: relative;
-            width: 200px;
-            height: 200px;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        }
-        
-        .radar-circle {
-            position: absolute;
-            border-radius: 50%;
-            background: rgba(56, 189, 248, 0.1); /* sky-400 */
-            border: 1px solid rgba(56, 189, 248, 0.3);
-            animation: pulse 3s infinite cubic-bezier(0.215, 0.61, 0.355, 1);
-            opacity: 0;
-            width: 100%;
-            height: 100%;
-        }
+      /* Radar Pulse Animation */
+      .radar-container {
+        position: relative;
+        width: 200px;
+        height: 200px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
 
-        .radar-circle:nth-child(2) { animation-delay: 1s; }
-        .radar-circle:nth-child(3) { animation-delay: 2s; }
+      .radar-circle {
+        position: absolute;
+        border-radius: 50%;
+        background: rgba(56, 189, 248, 0.1);
+        border: 1px solid rgba(56, 189, 248, 0.3);
+        animation: pulse 3s infinite cubic-bezier(0.215, 0.61, 0.355, 1);
+        opacity: 0;
+        width: 100%;
+        height: 100%;
+      }
 
-        @keyframes pulse {
-            0% { transform: scale(0.5); opacity: 0; }
-            50% { opacity: 1; }
-            100% { transform: scale(1.5); opacity: 0; }
+      .radar-circle:nth-child(2) {
+        animation-delay: 1s;
+      }
+      .radar-circle:nth-child(3) {
+        animation-delay: 2s;
+      }
+
+      @keyframes pulse {
+        0% {
+          transform: scale(0.5);
+          opacity: 0;
         }
-
-        .glass-panel {
-            background: rgba(30, 41, 59, 0.7); /* slate-800 */
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        50% {
+          opacity: 1;
         }
+        100% {
+          transform: scale(1.5);
+          opacity: 0;
+        }
+      }
 
-        /* Custom Scrollbar */
-        ::-webkit-scrollbar { width: 8px; }
-        ::-webkit-scrollbar-track { background: #1e293b; }
-        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+      .glass-panel {
+        background: rgba(30, 41, 59, 0.7);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+      }
+
+      /* Custom Scrollbar */
+      ::-webkit-scrollbar {
+        width: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #1e293b;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #475569;
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #64748b;
+      }
     </style>
-</head>
-<body class="min-h-screen flex flex-col antialiased selection:bg-sky-500 selection:text-white">
-
+  </head>
+  <body
+    class="min-h-screen flex flex-col antialiased selection:bg-sky-500 selection:text-white"
+  >
     <header class="w-full p-6 flex justify-between items-center z-10 relative">
-        <div class="flex items-center gap-2">
-            <i class="ph-fill ph-paper-plane-tilt text-3xl text-sky-400"></i>
-            <h1 class="text-2xl font-bold tracking-tight">Local<span class="text-sky-400">Drop</span></h1>
-        </div>
-        <div class="flex items-center gap-3 glass-panel px-4 py-2 rounded-full text-sm font-medium">
-            <div id="status-dot" class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></div>
-            <span id="status-text">Connecting to signaling server...</span>
-        </div>
+      <div class="flex items-center gap-2">
+        <i class="ph-fill ph-paper-plane-tilt text-3xl text-sky-400"></i>
+        <h1 class="text-2xl font-bold tracking-tight">
+          Local<span class="text-sky-400">Drop</span>
+        </h1>
+      </div>
+      <div
+        class="flex items-center gap-3 glass-panel px-4 py-2 rounded-full text-sm font-medium"
+      >
+        <div
+          id="status-dot"
+          class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"
+        ></div>
+        <span id="status-text">Connecting...</span>
+      </div>
     </header>
 
-    <main class="flex-1 flex flex-col items-center justify-center p-4 z-10 relative w-full max-w-4xl mx-auto">
-        
-        <!-- Radar Visualization (Visible when not connected) -->
-        <div id="discovery-view" class="flex flex-col items-center w-full transition-all duration-500">
-            <div class="radar-container mb-12">
-                <div class="radar-circle"></div>
-                <div class="radar-circle"></div>
-                <div class="radar-circle"></div>
-                <div class="w-24 h-24 bg-slate-800 rounded-full flex items-center justify-center z-10 shadow-lg border border-slate-700">
-                    <i class="ph ph-laptop text-4xl text-slate-300"></i>
-                </div>
-            </div>
-
-            <div class="glass-panel p-8 rounded-3xl w-full max-w-md text-center">
-                <p class="text-slate-400 text-sm mb-2 uppercase tracking-widest font-semibold">Your Device ID</p>
-                <div class="text-4xl font-mono font-bold text-sky-400 mb-8 tracking-widest" id="my-id-display">
-                    ---
-                </div>
-
-                <div class="space-y-4">
-                    <p class="text-sm text-slate-300">Enter a peer's ID to connect directly via WebRTC:</p>
-                    <div class="flex gap-2">
-                        <input type="text" id="target-id-input" placeholder="e.g. A1B2C" 
-                            class="flex-1 bg-slate-900 border border-slate-600 rounded-xl px-4 py-3 text-lg font-mono uppercase text-center focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 transition-all placeholder:text-slate-600 uppercase">
-                        <button id="connect-btn" class="bg-sky-500 hover:bg-sky-400 text-slate-900 font-bold px-6 py-3 rounded-xl transition-all active:scale-95 flex items-center gap-2">
-                            Connect <i class="ph ph-arrow-right-bold"></i>
-                        </button>
-                    </div>
-                </div>
-            </div>
+    <main
+      class="flex-1 flex flex-col items-center justify-center p-4 z-10 relative w-full max-w-4xl mx-auto"
+    >
+      <!-- Discovery View -->
+      <div
+        id="discovery-view"
+        class="flex flex-col items-center w-full transition-all duration-500"
+      >
+        <div class="radar-container mb-12">
+          <div class="radar-circle"></div>
+          <div class="radar-circle"></div>
+          <div class="radar-circle"></div>
+          <div
+            class="w-24 h-24 bg-slate-800 rounded-full flex items-center justify-center z-10 shadow-lg border border-slate-700"
+          >
+            <i class="ph ph-laptop text-4xl text-slate-300"></i>
+          </div>
         </div>
 
-        <!-- Connected View (Hidden by default) -->
-        <div id="transfer-view" class="hidden flex-col items-center w-full transition-all duration-500 w-full max-w-2xl">
-            <div class="flex items-center justify-between w-full mb-8">
-                <div class="flex items-center gap-3">
-                    <div class="w-12 h-12 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center border border-emerald-500/30">
-                        <i class="ph ph-check-circle text-2xl"></i>
-                    </div>
-                    <div>
-                        <p class="text-slate-400 text-xs uppercase tracking-wider font-semibold">Connected to</p>
-                        <p class="text-xl font-bold text-white font-mono" id="connected-peer-id">---</p>
-                    </div>
-                </div>
-                <button id="disconnect-btn" class="text-slate-400 hover:text-red-400 transition-colors px-4 py-2 rounded-lg hover:bg-red-400/10 text-sm font-medium border border-transparent hover:border-red-400/20">
-                    Disconnect
-                </button>
-            </div>
+        <div class="glass-panel p-8 rounded-3xl w-full max-w-md text-center">
+          <p
+            class="text-slate-400 text-sm mb-2 uppercase tracking-widest font-semibold"
+          >
+            Your Device ID
+          </p>
+          <div
+            class="text-4xl font-mono font-bold text-sky-400 mb-8 tracking-widest"
+            id="my-id-display"
+          >
+            ---
+          </div>
 
-            <div class="glass-panel w-full rounded-3xl p-8 border border-slate-700/50 relative overflow-hidden group">
-                <!-- Dropzone styling -->
-                <div class="absolute inset-0 bg-sky-500/5 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"></div>
-                
-                <div class="text-center">
-                    <i class="ph ph-cloud-arrow-up text-6xl text-sky-400 mb-4 inline-block animate-bounce"></i>
-                    <h3 class="text-xl font-semibold mb-2">Send a File</h3>
-                    <p class="text-slate-400 text-sm mb-6">Click to browse or drag and drop a file here.<br>Transfers directly over your local network.</p>
-                    
-                    <input type="file" id="file-input" class="hidden">
-                    <button onclick="document.getElementById('file-input').click()" class="bg-slate-700 hover:bg-slate-600 border border-slate-500 text-white font-semibold py-3 px-8 rounded-xl transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2 mx-auto">
-                        <i class="ph ph-folder-open text-xl"></i> Select File
-                    </button>
-                </div>
+          <div class="space-y-4">
+            <p class="text-sm text-slate-300">
+              Enter a peer's ID to connect directly:
+            </p>
+            <div class="flex gap-2">
+              <input
+                type="text"
+                id="target-id-input"
+                placeholder="e.g. A1B2C"
+                class="flex-1 bg-slate-900 border border-slate-600 rounded-xl px-4 py-3 text-lg font-mono uppercase text-center focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 transition-all placeholder:text-slate-600 uppercase"
+              />
+              <button
+                id="connect-btn"
+                class="bg-sky-500 hover:bg-sky-400 text-slate-900 font-bold px-6 py-3 rounded-xl transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed min-w-[120px]"
+              >
+                Connect <i class="ph ph-arrow-right-bold"></i>
+              </button>
             </div>
+          </div>
+        </div>
+      </div>
 
-            <!-- Transfer Logs / History -->
-            <div class="w-full mt-8 glass-panel rounded-2xl p-6">
-                <h4 class="text-sm font-semibold text-slate-300 uppercase tracking-widest mb-4 flex items-center gap-2">
-                    <i class="ph ph-clock-counter-clockwise"></i> Transfer History
-                </h4>
-                <div id="transfer-logs" class="space-y-3 max-h-48 overflow-y-auto pr-2">
-                    <div class="text-slate-500 text-sm italic text-center py-4">No files transferred yet.</div>
-                </div>
+      <!-- Connected Transfer View -->
+      <div
+        id="transfer-view"
+        class="hidden flex-col items-center w-full transition-all duration-500 w-full max-w-2xl"
+      >
+        <div class="flex items-center justify-between w-full mb-8">
+          <div class="flex items-center gap-3">
+            <div
+              class="w-12 h-12 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center border border-emerald-500/30"
+            >
+              <i class="ph ph-check-circle text-2xl"></i>
             </div>
+            <div>
+              <p
+                class="text-slate-400 text-xs uppercase tracking-wider font-semibold"
+              >
+                Connected to
+              </p>
+              <p
+                class="text-xl font-bold text-white font-mono"
+                id="connected-peer-id"
+              >
+                ---
+              </p>
+            </div>
+          </div>
+          <button
+            id="disconnect-btn"
+            class="text-slate-400 hover:text-red-400 transition-colors px-4 py-2 rounded-lg hover:bg-red-400/10 text-sm font-medium border border-transparent hover:border-red-400/20"
+          >
+            Disconnect
+          </button>
         </div>
 
+        <div
+          class="glass-panel w-full rounded-3xl p-8 border border-slate-700/50 relative overflow-hidden group"
+        >
+          <div
+            class="absolute inset-0 bg-sky-500/5 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+          ></div>
+          <div class="text-center">
+            <i
+              class="ph ph-cloud-arrow-up text-6xl text-sky-400 mb-4 inline-block animate-bounce"
+            ></i>
+            <h3 class="text-xl font-semibold mb-2">Send a File</h3>
+            <p class="text-slate-400 text-sm mb-6">
+              Click to browse or drag and drop a file here.<br />Transfers
+              directly P2P.
+            </p>
+
+            <input type="file" id="file-input" class="hidden" />
+            <button
+              onclick="document.getElementById('file-input').click()"
+              class="bg-slate-700 hover:bg-slate-600 border border-slate-500 text-white font-semibold py-3 px-8 rounded-xl transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2 mx-auto"
+            >
+              <i class="ph ph-folder-open text-xl"></i> Select File
+            </button>
+          </div>
+        </div>
+
+        <div class="w-full mt-8 glass-panel rounded-2xl p-6">
+          <h4
+            class="text-sm font-semibold text-slate-300 uppercase tracking-widest mb-4 flex items-center gap-2"
+          >
+            <i class="ph ph-clock-counter-clockwise"></i> Transfer History
+          </h4>
+          <div
+            id="transfer-logs"
+            class="space-y-3 max-h-48 overflow-y-auto pr-2"
+          >
+            <div class="text-slate-500 text-sm italic text-center py-4">
+              No files transferred yet.
+            </div>
+          </div>
+        </div>
+      </div>
     </main>
 
-    <!-- Custom Toast Notifications (replaces alert) -->
-    <div id="toast-container" class="fixed bottom-6 right-6 z-50 flex flex-col gap-3"></div>
+    <div
+      id="toast-container"
+      class="fixed bottom-6 right-6 z-50 flex flex-col gap-3"
+    ></div>
 
-    <script>
-        /* --- DOM Elements --- */
-        const statusDot = document.getElementById('status-dot');
-        const statusText = document.getElementById('status-text');
-        const myIdDisplay = document.getElementById('my-id-display');
-        const targetIdInput = document.getElementById('target-id-input');
-        const connectBtn = document.getElementById('connect-btn');
-        const discoveryView = document.getElementById('discovery-view');
-        const transferView = document.getElementById('transfer-view');
-        const connectedPeerIdDisplay = document.getElementById('connected-peer-id');
-        const disconnectBtn = document.getElementById('disconnect-btn');
-        const fileInput = document.getElementById('file-input');
-        const transferLogs = document.getElementById('transfer-logs');
+    <script type="module">
+      // Generate a 5-character alphanumeric ID
+      function generateShortId() {
+        const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let result = "";
+        for (let i = 0; i < 5; i++) {
+          result += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        return result;
+      }
 
-        /* --- State --- */
-        let peer = null;
-        let conn = null;
-        let myId = '';
+      /* --- Global State & UI Elements --- */
+      const statusDot = document.getElementById("status-dot");
+      const statusText = document.getElementById("status-text");
+      const myIdDisplay = document.getElementById("my-id-display");
+      const targetIdInput = document.getElementById("target-id-input");
+      const connectBtn = document.getElementById("connect-btn");
+      const discoveryView = document.getElementById("discovery-view");
+      const transferView = document.getElementById("transfer-view");
+      const connectedPeerIdDisplay =
+        document.getElementById("connected-peer-id");
+      const disconnectBtn = document.getElementById("disconnect-btn");
+      const fileInput = document.getElementById("file-input");
+      const transferLogs = document.getElementById("transfer-logs");
 
-        // Generate a 5-character alphanumeric ID for easy typing
-        function generateShortId() {
-            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-            let result = '';
-            for (let i = 0; i < 5; i++) {
-                result += chars.charAt(Math.floor(Math.random() * chars.length));
-            }
-            return result;
+      let myId = generateShortId();
+      let activeConnection = null;
+      let nativePC = null; // Used only in Canvas Mode
+      let connectionTimeout = null;
+
+      // Detect if we are inside the Canvas Sandbox or downloaded locally
+      const isCanvas = typeof __firebase_config !== "undefined";
+
+      /* --- UI Helper Functions --- */
+      function showToast(message, type = "info") {
+        const container = document.getElementById("toast-container");
+        const toast = document.createElement("div");
+
+        let bgClass = "bg-slate-800 border-slate-700 text-white";
+        let icon = '<i class="ph-fill ph-info text-sky-400"></i>';
+        if (type === "error") {
+          bgClass = "bg-red-950 border-red-900 text-red-100";
+          icon = '<i class="ph-fill ph-warning-circle text-red-400"></i>';
+        } else if (type === "success") {
+          bgClass = "bg-emerald-950 border-emerald-900 text-emerald-100";
+          icon = '<i class="ph-fill ph-check-circle text-emerald-400"></i>';
         }
 
-        // Custom Toast Notification System
-        function showToast(message, type = 'info') {
-            const container = document.getElementById('toast-container');
-            const toast = document.createElement('div');
-            
-            // Styling based on type
-            let bgClass = 'bg-slate-800 border-slate-700 text-white';
-            let icon = '<i class="ph-fill ph-info text-sky-400"></i>';
-            if (type === 'error') {
-                bgClass = 'bg-red-950 border-red-900 text-red-100';
-                icon = '<i class="ph-fill ph-warning-circle text-red-400"></i>';
-            } else if (type === 'success') {
-                bgClass = 'bg-emerald-950 border-emerald-900 text-emerald-100';
-                icon = '<i class="ph-fill ph-check-circle text-emerald-400"></i>';
-            }
+        toast.className = `flex items-center gap-3 px-4 py-3 rounded-xl border shadow-xl transform transition-all duration-300 translate-y-10 opacity-0 ${bgClass}`;
+        toast.innerHTML = `${icon} <span class="text-sm font-medium">${message}</span>`;
 
-            toast.className = `flex items-center gap-3 px-4 py-3 rounded-xl border shadow-xl transform transition-all duration-300 translate-y-10 opacity-0 ${bgClass}`;
-            toast.innerHTML = `${icon} <span class="text-sm font-medium">${message}</span>`;
-            
-            container.appendChild(toast);
-            
-            // Animate in
-            requestAnimationFrame(() => {
-                toast.classList.remove('translate-y-10', 'opacity-0');
-            });
+        container.appendChild(toast);
 
-            // Remove after 3 seconds
-            setTimeout(() => {
-                toast.classList.add('translate-y-10', 'opacity-0');
-                setTimeout(() => toast.remove(), 300);
-            }, 3000);
-        }
+        requestAnimationFrame(() =>
+          toast.classList.remove("translate-y-10", "opacity-0"),
+        );
+        setTimeout(() => {
+          toast.classList.add("translate-y-10", "opacity-0");
+          setTimeout(() => toast.remove(), 300);
+        }, 3000);
+      }
 
-        /* --- Initialization --- */
-        function initPeer() {
-            myId = generateShortId();
-            // Initialize PeerJS using their free cloud signaling server
-            peer = new Peer(myId, {
-                debug: 2
-            });
+      function showTransferUI(peerId) {
+        discoveryView.classList.add("hidden");
+        transferView.classList.remove("hidden");
+        transferView.classList.add("flex");
+        connectedPeerIdDisplay.innerText = peerId;
+        connectBtn.disabled = false;
+        connectBtn.innerHTML = 'Connect <i class="ph ph-arrow-right-bold"></i>';
+      }
 
-            peer.on('open', (id) => {
-                myIdDisplay.innerText = id;
-                statusDot.classList.replace('bg-amber-400', 'bg-emerald-400');
-                statusDot.classList.remove('animate-pulse');
-                statusText.innerText = 'Online & Ready';
-                showToast(`Your ID is ${id}. Ready to connect!`, 'success');
-            });
+      function resetUI() {
+        if (activeConnection) activeConnection.close();
+        if (nativePC) nativePC.close();
+        activeConnection = null;
+        nativePC = null;
+        clearTimeout(connectionTimeout);
 
-            // Listen for incoming connections
-            peer.on('connection', (connection) => {
-                handleConnection(connection);
-            });
+        discoveryView.classList.remove("hidden");
+        transferView.classList.add("hidden");
+        transferView.classList.remove("flex");
+        targetIdInput.value = "";
+        connectedPeerIdDisplay.innerText = "---";
+        connectBtn.disabled = false;
+        connectBtn.innerHTML = 'Connect <i class="ph ph-arrow-right-bold"></i>';
+      }
 
-            peer.on('error', (err) => {
-                console.error(err);
-                if (err.type === 'peer-unavailable') {
-                    showToast('Device ID not found. Ensure the other tab is open.', 'error');
-                } else {
-                    showToast(`Connection error: ${err.type}`, 'error');
-                }
-                resetUI();
-            });
-            
-            peer.on('disconnected', () => {
-                statusDot.classList.replace('bg-emerald-400', 'bg-red-500');
-                statusText.innerText = 'Disconnected from Server';
-            });
-        }
+      function formatBytes(bytes) {
+        if (!+bytes) return "0 Bytes";
+        const k = 1024,
+          i = Math.floor(Math.log(bytes) / Math.log(k));
+        return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${["Bytes", "KB", "MB", "GB", "TB"][i]}`;
+      }
 
-        /* --- Connection Handling --- */
-        function handleConnection(connection) {
-            conn = connection;
-            
-            conn.on('open', () => {
-                showToast(`Connected to ${conn.peer}`, 'success');
-                showTransferUI(conn.peer);
-            });
+      function logTransfer(direction, name, size, downloadUrl = null) {
+        const emptyMsg = transferLogs.querySelector(".italic");
+        if (emptyMsg) emptyMsg.remove();
 
-            conn.on('data', (data) => {
-                // PeerJS handles ArrayBuffers and Blobs natively!
-                if (data.type === 'file') {
-                    receiveFile(data);
-                } else if (data.type === 'text') {
-                    showToast(`Message from ${conn.peer}: ${data.content}`);
-                }
-            });
+        const logItem = document.createElement("div");
+        logItem.className =
+          "flex items-center justify-between p-3 rounded-lg bg-slate-800/50 border border-slate-700";
+        const iconColor =
+          direction === "Sent" ? "text-sky-400" : "text-emerald-400";
+        const iconType =
+          direction === "Sent" ? "ph-arrow-up-right" : "ph-arrow-down-left";
 
-            conn.on('close', () => {
-                showToast(`Connection to ${conn.peer} closed.`, 'info');
-                resetUI();
-            });
-            
-            conn.on('error', (err) => {
-                showToast(`Data channel error: ${err}`, 'error');
-                resetUI();
-            });
-        }
+        let actionButton = downloadUrl
+          ? `<a href="${downloadUrl}" download="${name}" class="bg-emerald-500 hover:bg-emerald-400 text-slate-900 px-3 py-1 text-xs font-bold rounded-md transition-colors shadow-sm">Download</a>`
+          : "";
 
-        // Connect Button Event
-        connectBtn.addEventListener('click', () => {
-            const targetId = targetIdInput.value.trim().toUpperCase();
-            if (!targetId) {
-                showToast('Please enter a Device ID to connect.', 'error');
-                return;
-            }
-            if (targetId === myId) {
-                showToast('You cannot connect to yourself!', 'error');
-                return;
-            }
-
-            showToast(`Connecting to ${targetId}...`);
-            const connection = peer.connect(targetId, {
-                reliable: true
-            });
-            handleConnection(connection);
-        });
-
-        // Disconnect Button Event
-        disconnectBtn.addEventListener('click', () => {
-            if (conn) {
-                conn.close();
-            }
-            resetUI();
-        });
-
-        /* --- File Transfer Logic --- */
-        
-        // Handle file selection
-        fileInput.addEventListener('change', () => {
-            const file = fileInput.files[0];
-            if (!file) return;
-            if (!conn || !conn.open) {
-                showToast('Connection is not open.', 'error');
-                return;
-            }
-
-            showToast(`Sending ${file.name}...`, 'info');
-            
-            // Read and send file
-            // Note: PeerJS handles serialization. For massive files (>50MB), 
-            // chunking manually is better, but PeerJS works fine for typical files.
-            conn.send({
-                type: 'file',
-                file: file, // Send Blob/File object directly
-                name: file.name,
-                size: file.size,
-                mime: file.type
-            });
-
-            logTransfer('Sent', file.name, file.size);
-            
-            // Reset input so the same file can be selected again if needed
-            fileInput.value = '';
-        });
-
-        function receiveFile(data) {
-            showToast(`Received file: ${data.name}`, 'success');
-            
-            // Convert received ArrayBuffer/Blob back to a downloadable URL
-            const blob = new Blob([data.file], { type: data.mime });
-            const url = URL.createObjectURL(blob);
-            
-            logTransfer('Received', data.name, data.size, url);
-        }
-
-        /* --- UI Helpers --- */
-        function showTransferUI(peerId) {
-            discoveryView.classList.add('hidden');
-            transferView.classList.remove('hidden');
-            transferView.classList.add('flex');
-            connectedPeerIdDisplay.innerText = peerId;
-        }
-
-        function resetUI() {
-            conn = null;
-            discoveryView.classList.remove('hidden');
-            transferView.classList.add('hidden');
-            transferView.classList.remove('flex');
-            targetIdInput.value = '';
-            connectedPeerIdDisplay.innerText = '---';
-        }
-
-        function formatBytes(bytes, decimals = 2) {
-            if (!+bytes) return '0 Bytes';
-            const k = 1024;
-            const dm = decimals < 0 ? 0 : decimals;
-            const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
-        }
-
-        function logTransfer(direction, name, size, downloadUrl = null) {
-            // Remove empty state message if it exists
-            const emptyMsg = transferLogs.querySelector('.italic');
-            if (emptyMsg) emptyMsg.remove();
-
-            const logItem = document.createElement('div');
-            logItem.className = 'flex items-center justify-between p-3 rounded-lg bg-slate-800/50 border border-slate-700';
-            
-            const iconColor = direction === 'Sent' ? 'text-sky-400' : 'text-emerald-400';
-            const iconType = direction === 'Sent' ? 'ph-arrow-up-right' : 'ph-arrow-down-left';
-
-            let actionButton = '';
-            if (downloadUrl) {
-                actionButton = `<a href="${downloadUrl}" download="${name}" class="bg-emerald-500 hover:bg-emerald-400 text-slate-900 px-3 py-1 text-xs font-bold rounded-md transition-colors shadow-sm">Download</a>`;
-            }
-
-            logItem.innerHTML = `
+        logItem.innerHTML = `
                 <div class="flex items-center gap-3 overflow-hidden">
                     <div class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center shrink-0">
                         <i class="ph-bold ${iconType} ${iconColor}"></i>
@@ -412,13 +373,357 @@
                 </div>
                 <div>${actionButton}</div>
             `;
-            
-            transferLogs.prepend(logItem);
+        transferLogs.prepend(logItem);
+      }
+
+      /* --- Unified File Transfer Data Handlers --- */
+      const CHUNK_SIZE = 16384; // 16KB WebRTC chunk limit
+      let receiveBuffer = [];
+      let receiveMeta = null;
+
+      // Sending Files
+      fileInput.addEventListener("change", () => {
+        const file = fileInput.files[0];
+        if (!file || !activeConnection) return;
+
+        showToast(`Sending ${file.name}...`, "info");
+        logTransfer("Sent", file.name, file.size);
+
+        const isPeerJS = !!activeConnection.dataChannel;
+
+        if (isPeerJS) {
+          // Engine 2 (PeerJS) handles chunking automatically under the hood
+          activeConnection.send({
+            type: "file",
+            file: file,
+            name: file.name,
+            size: file.size,
+            mime: file.type,
+          });
+        } else {
+          // Engine 1 (Canvas Native RTC) Requires manual chunking
+          activeConnection.send(
+            JSON.stringify({
+              type: "header",
+              name: file.name,
+              size: file.size,
+              mime: file.type,
+            }),
+          );
+          const reader = new FileReader();
+          let offset = 0;
+
+          reader.onload = (e) => {
+            activeConnection.send(e.target.result); // Send ArrayBuffer chunk
+            offset += e.target.result.byteLength;
+            if (offset < file.size) {
+              readSlice(offset);
+            } else {
+              activeConnection.send(JSON.stringify({ type: "end" }));
+            }
+          };
+          const readSlice = (o) =>
+            reader.readAsArrayBuffer(file.slice(o, o + CHUNK_SIZE));
+          readSlice(0);
+        }
+        fileInput.value = "";
+      });
+
+      // Receiving Files
+      function handleIncomingData(data) {
+        if (data.type === "file") {
+          // Engine 2 (PeerJS) Payload
+          const blob = new Blob([data.file], { type: data.mime });
+          const url = URL.createObjectURL(blob);
+          logTransfer("Received", data.name, data.size, url);
+          showToast(`Received file: ${data.name}`, "success");
+        } else if (typeof data === "string") {
+          // Engine 1 (Canvas Native RTC) Payload Metadata
+          try {
+            const msg = JSON.parse(data);
+            if (msg.type === "header") {
+              receiveMeta = msg;
+              receiveBuffer = [];
+            } else if (msg.type === "end") {
+              const blob = new Blob(receiveBuffer, { type: receiveMeta.mime });
+              const url = URL.createObjectURL(blob);
+              logTransfer("Received", receiveMeta.name, receiveMeta.size, url);
+              showToast(`Received file: ${receiveMeta.name}`, "success");
+              receiveMeta = null;
+              receiveBuffer = [];
+            }
+          } catch (e) {}
+        } else if (data instanceof ArrayBuffer || data instanceof Blob) {
+          // Engine 1 (Canvas Native RTC) Payload Chunk
+          receiveBuffer.push(data);
+        }
+      }
+
+      /* --- Engine Initializers --- */
+
+      // Engine 1: Canvas Mode (Bypasses WebSocket limits using internal Firestore Signaling)
+      async function initCanvasWebRTC() {
+        // Dynamically import Firebase ONLY if in Canvas
+        const { initializeApp } =
+          await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js");
+        const {
+          getAuth,
+          signInAnonymously,
+          signInWithCustomToken,
+          onAuthStateChanged,
+        } =
+          await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js");
+        const {
+          getFirestore,
+          doc,
+          setDoc,
+          getDoc,
+          collection,
+          onSnapshot,
+          updateDoc,
+          arrayUnion,
+        } =
+          await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
+
+        const app = initializeApp(JSON.parse(__firebase_config));
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId =
+          typeof __app_id !== "undefined" ? __app_id : "default-app-id";
+
+        let roomRef = null;
+        let isHost = true;
+        let processedCandidates = new Set();
+
+        if (
+          typeof __initial_auth_token !== "undefined" &&
+          __initial_auth_token
+        ) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
         }
 
-        // Initialize App
-        initPeer();
+        onAuthStateChanged(auth, async (user) => {
+          if (!user) return;
 
+          statusDot.classList.replace("bg-amber-400", "bg-emerald-400");
+          statusDot.classList.remove("animate-pulse");
+          statusText.innerText = "Online (Canvas Network)";
+          myIdDisplay.innerText = myId;
+
+          roomRef = doc(
+            collection(
+              db,
+              "artifacts",
+              appId,
+              "public",
+              "data",
+              "webrtc_rooms",
+            ),
+            myId,
+          );
+          await setDoc(roomRef, {
+            createdAt: Date.now(),
+            hostAnswer: null,
+            guestOffer: null,
+            hostCandidates: [],
+            guestCandidates: [],
+          });
+
+          onSnapshot(roomRef, async (snapshot) => {
+            const data = snapshot.data();
+            if (!data) return;
+
+            // Host receives offer
+            if (data.guestOffer && !data.hostAnswer && !nativePC) {
+              isHost = true;
+              setupNativePC(roomRef, isHost, updateDoc, arrayUnion);
+
+              nativePC.ondatachannel = (event) => {
+                activeConnection = event.channel;
+                setupDataChannel(activeConnection, "Guest");
+              };
+
+              await nativePC.setRemoteDescription(
+                new RTCSessionDescription(JSON.parse(data.guestOffer)),
+              );
+              const answer = await nativePC.createAnswer();
+              await nativePC.setLocalDescription(answer);
+              await updateDoc(roomRef, { hostAnswer: JSON.stringify(answer) });
+            }
+
+            // Process ICE Candidates
+            if (
+              nativePC &&
+              nativePC.remoteDescription &&
+              data.guestCandidates
+            ) {
+              for (const cand of data.guestCandidates) {
+                if (!processedCandidates.has(cand)) {
+                  processedCandidates.add(cand);
+                  await nativePC.addIceCandidate(
+                    new RTCIceCandidate(JSON.parse(cand)),
+                  );
+                }
+              }
+            }
+          });
+        });
+
+        window.connectToPeer = async (targetId) => {
+          isHost = false;
+          roomRef = doc(
+            collection(
+              db,
+              "artifacts",
+              appId,
+              "public",
+              "data",
+              "webrtc_rooms",
+            ),
+            targetId,
+          );
+          const snap = await getDoc(roomRef);
+
+          if (!snap.exists()) {
+            showToast("Device not found", "error");
+            resetUI();
+            return;
+          }
+
+          setupNativePC(roomRef, isHost, updateDoc, arrayUnion);
+          activeConnection = nativePC.createDataChannel("file-transfer", {
+            reliable: true,
+          });
+          setupDataChannel(activeConnection, targetId);
+
+          const offer = await nativePC.createOffer();
+          await nativePC.setLocalDescription(offer);
+          await updateDoc(roomRef, { guestOffer: JSON.stringify(offer) });
+
+          onSnapshot(roomRef, async (snapshot) => {
+            const data = snapshot.data();
+            if (!data) return;
+
+            if (data.hostAnswer && !nativePC.currentRemoteDescription) {
+              await nativePC.setRemoteDescription(
+                new RTCSessionDescription(JSON.parse(data.hostAnswer)),
+              );
+            }
+
+            if (nativePC && nativePC.remoteDescription && data.hostCandidates) {
+              for (const cand of data.hostCandidates) {
+                if (!processedCandidates.has(cand)) {
+                  processedCandidates.add(cand);
+                  await nativePC.addIceCandidate(
+                    new RTCIceCandidate(JSON.parse(cand)),
+                  );
+                }
+              }
+            }
+          });
+        };
+
+        function setupNativePC(rRef, hostFlag, uDoc, aUnion) {
+          nativePC = new RTCPeerConnection({
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+          });
+          nativePC.onicecandidate = (event) => {
+            if (event.candidate) {
+              uDoc(rRef, {
+                [hostFlag ? "hostCandidates" : "guestCandidates"]: aUnion(
+                  JSON.stringify(event.candidate.toJSON()),
+                ),
+              });
+            }
+          };
+        }
+
+        function setupDataChannel(channel, peerName) {
+          channel.onopen = () => {
+            clearTimeout(connectionTimeout);
+            showToast(`Connected!`, "success");
+            showTransferUI(peerName);
+          };
+          channel.onmessage = (event) => handleIncomingData(event.data);
+          channel.onclose = () => resetUI();
+        }
+      }
+
+      // Engine 2: Local File Mode (Uses PeerJS when downloaded locally)
+      function initLocalWebRTC() {
+        const peer = new Peer(myId, {
+          config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
+        });
+
+        peer.on("open", (id) => {
+          statusDot.classList.replace("bg-amber-400", "bg-emerald-400");
+          statusDot.classList.remove("animate-pulse");
+          statusText.innerText = "Online (Local Mode)";
+          myIdDisplay.innerText = id;
+        });
+
+        peer.on("connection", (conn) => {
+          activeConnection = conn;
+          conn.on("open", () => {
+            clearTimeout(connectionTimeout);
+            showTransferUI(conn.peer);
+          });
+          conn.on("data", handleIncomingData);
+          conn.on("close", resetUI);
+        });
+
+        peer.on("error", (err) => {
+          showToast("Connection Error. Check network.", "error");
+          resetUI();
+        });
+
+        window.connectToPeer = (targetId) => {
+          activeConnection = peer.connect(targetId, { reliable: true });
+          activeConnection.on("open", () => {
+            clearTimeout(connectionTimeout);
+            showTransferUI(targetId);
+          });
+          activeConnection.on("data", handleIncomingData);
+          activeConnection.on("close", resetUI);
+        };
+      }
+
+      /* --- Global Button Listeners --- */
+      connectBtn.addEventListener("click", () => {
+        const targetId = targetIdInput.value.trim().toUpperCase();
+        if (!targetId || targetId === myId) {
+          showToast("Invalid Device ID", "error");
+          return;
+        }
+
+        connectBtn.disabled = true;
+        connectBtn.innerHTML =
+          '<i class="ph ph-spinner animate-spin text-xl"></i> Connecting...';
+
+        connectionTimeout = setTimeout(() => {
+          if (
+            !activeConnection ||
+            (activeConnection.readyState !== "open" && !activeConnection.open)
+          ) {
+            showToast("Connection timed out.", "error");
+            resetUI();
+          }
+        }, 15000);
+
+        // Calls either the Canvas Mode or Local Mode connector
+        window.connectToPeer(targetId);
+      });
+
+      disconnectBtn.addEventListener("click", resetUI);
+
+      /* --- Boot Sequence --- */
+      if (isCanvas) {
+        initCanvasWebRTC();
+      } else {
+        initLocalWebRTC();
+      }
     </script>
-</body>
+  </body>
 </html>
