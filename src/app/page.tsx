@@ -7,6 +7,11 @@ const CHUNK_SIZE   = 64  * 1024;
 const SEGMENT_SIZE = 16  * 1024 * 1024;
 const HIGHWATER    = 4   * 1024 * 1024;
 const LOWWATER     = 256 * 1024;
+const ICE_SERVERS  = [{ urls: "stun:stun.l.google.com:19302" }];
+
+// When this env var is set, the app uses direct WebSocket signaling (full LAN speed).
+// Without it, PeerJS is used as fallback (works everywhere, limited by public relay speed).
+const SIGNAL_SERVER = process.env.NEXT_PUBLIC_SIGNAL_SERVER ?? null;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function genId() {
@@ -15,42 +20,33 @@ function genId() {
   for (let i = 0; i < 5; i++) r += c[Math.floor(Math.random() * c.length)];
   return r;
 }
-
 function formatBytes(b: number) {
   if (!b) return "0 B";
   const k = 1024, i = Math.floor(Math.log(b) / Math.log(k));
   return `${(b / Math.pow(k, i)).toFixed(2)} ${["B","KB","MB","GB","TB"][i]}`;
 }
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-interface Toast   { id: number; msg: string; type: "info"|"success"|"error"; }
-interface LogEntry{ id: number; direction: "Sent"|"Received"; name: string; size: number; url?: string; }
-interface FileMeta{ name: string; size: number; mime: string; }
-
-// ─── LAN room ID from ICE candidates ─────────────────────────────────────────
+// ─── LAN room ID (PeerJS hub/spoke only) ─────────────────────────────────────
 async function getLanRoomId(): Promise<string> {
   return new Promise((resolve) => {
-    const pc = new RTCPeerConnection({ iceServers: [] });
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pc.createDataChannel("x");
     pc.createOffer().then((o) => pc.setLocalDescription(o)).catch(() => resolve("LDROPNET0"));
-
     let found: string | null = null, done = false;
     const finish = (id: string) => { if (!done) { done = true; pc.close(); resolve(id); } };
     setTimeout(() => finish(found ?? "LDROPNET0"), 4000);
-
     const hash = (s: string) => {
       let h = 0;
       for (const c of s) h = (Math.imul(31, h) + c.charCodeAt(0)) | 0;
       return "LD" + Math.abs(h).toString(36).toUpperCase().slice(0, 5);
     };
-
     pc.onicecandidate = ({ candidate }) => {
       if (!candidate) { finish(found ?? "LDROPNET0"); return; }
       const parts = candidate.candidate.split(" ");
       const ip = parts[4], type = parts[7];
-      if (type === "host" && /^(\d+\.){3}\d+$/.test(ip) && !ip.startsWith("127.")) {
+      if (type === "host" && /^(\d+\.){3}\d+$/.test(ip) && !ip.startsWith("127."))
         finish(hash(ip.split(".").slice(0, 3).join(".")));
-      } else if (type === "srflx" && /^(\d+\.){3}\d+$/.test(ip) && !found) {
+      else if (type === "srflx" && /^(\d+\.){3}\d+$/.test(ip) && !found) {
         found = hash(ip);
         setTimeout(() => finish(found!), 600);
       }
@@ -58,25 +54,34 @@ async function getLanRoomId(): Promise<string> {
   });
 }
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+interface Toast    { id: number; msg: string; type: "info"|"success"|"error"; }
+interface LogEntry { id: number; direction: "Sent"|"Received"; name: string; size: number; url?: string; }
+interface FileMeta { name: string; size: number; mime: string; }
+
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function Page() {
   const myIdRef = useRef(genId());
 
-  // PeerJS refs (any — PeerJS loaded dynamically)
+  // Signaling refs
+  const wsRef      = useRef<WebSocket | null>(null);          // WS mode
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const peerRef    = useRef<any>(null);
+  const peerRef    = useRef<any>(null);                       // PeerJS mode
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const connRef    = useRef<any>(null);  // active PeerJS DataConnection
-  const dc         = useRef<RTCDataChannel | null>(null);
-  const connTimeout= useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pjsConnRef = useRef<any>(null);                       // PeerJS DataConnection
+  const rtcPcRef   = useRef<RTCPeerConnection | null>(null);  // WS mode RTCPeerConnection
 
-  // Hub/spoke LAN discovery
+  // Shared connection state
+  const dc           = useRef<RTCDataChannel | null>(null);
+  const connTimeout  = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Hub/spoke LAN discovery (PeerJS mode only)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const hubPeerRef    = useRef<any>(null);
+  const hubPeerRef   = useRef<any>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const hubClientMap  = useRef(new Map<string, any>());
-  const lanRoomId     = useRef<string | null>(null);
-  const isHub         = useRef(false);
+  const hubClientMap = useRef(new Map<string, any>());
+  const lanRoomId    = useRef<string | null>(null);
+  const isHub        = useRef(false);
 
   // Transfer state
   const sendFileRef      = useRef<File | null>(null);
@@ -90,17 +95,17 @@ export default function Page() {
   const recvWindowStart  = useRef(0);
 
   // UI state
-  const [myId, setMyId]             = useState(myIdRef.current);
-  const [status, setStatus]         = useState<"connecting"|"online"|"error">("connecting");
+  const [myId, setMyId]              = useState(myIdRef.current);
+  const [status, setStatus]          = useState<"connecting"|"online"|"error">("connecting");
   const [connectedPeer, setConnected]= useState<string | null>(null);
-  const [peers, setPeers]           = useState<string[]>([]);
-  const [toasts, setToasts]         = useState<Toast[]>([]);
-  const [logs, setLogs]             = useState<LogEntry[]>([]);
-  const [targetInput, setTarget]    = useState("");
-  const [connecting, setConnecting] = useState(false);
-  const [incomingFile, setIncoming] = useState<FileMeta | null>(null);
-  const [progress, setProgress]     = useState<{ pct: number; label: string } | null>(null);
-  const [isHubState, setIsHubState] = useState(false);
+  const [peers, setPeers]            = useState<string[]>([]);
+  const [toasts, setToasts]          = useState<Toast[]>([]);
+  const [logs, setLogs]              = useState<LogEntry[]>([]);
+  const [targetInput, setTarget]     = useState("");
+  const [connecting, setConnecting]  = useState(false);
+  const [incomingFile, setIncoming]  = useState<FileMeta | null>(null);
+  const [progress, setProgress]      = useState<{ pct: number; label: string } | null>(null);
+  const [isHubState, setIsHubState]  = useState(false);
 
   const toastId = useRef(0);
   const logId   = useRef(0);
@@ -118,20 +123,19 @@ export default function Page() {
   const showProgress = useCallback((current: number, total: number, label: string) => {
     setProgress({ pct: Math.min(100, Math.round((current / total) * 100)), label });
   }, []);
-
   const hideProgress = useCallback(() => setProgress(null), []);
 
   const resetConnection = useCallback(() => {
-    connRef.current?.close();
-    connRef.current = null;
     dc.current = null;
+    pjsConnRef.current?.close();  pjsConnRef.current = null;
+    rtcPcRef.current?.close();    rtcPcRef.current = null;
     if (connTimeout.current) clearTimeout(connTimeout.current);
     setConnected(null);
     setConnecting(false);
     hideProgress();
   }, [hideProgress]);
 
-  // ─── Data handler ──────────────────────────────────────────────────────────
+  // ─── Shared: incoming data handler ────────────────────────────────────────
   const handleData = useCallback(async (data: unknown) => {
     if (typeof data === "string") {
       let msg: Record<string, unknown>;
@@ -164,7 +168,7 @@ export default function Page() {
       }
     } else {
       const buf: ArrayBuffer = data instanceof Blob ? await data.arrayBuffer() : data as ArrayBuffer;
-      receivedSize.current += buf.byteLength;
+      receivedSize.current  += buf.byteLength;
       recvWindowBytes.current += buf.byteLength;
       const now = Date.now();
       if (now - lastReceiveUI.current >= 80) {
@@ -181,38 +185,32 @@ export default function Page() {
     }
   }, [addLog, addToast, hideProgress, showProgress]);
 
-  // ─── High-throughput sender ────────────────────────────────────────────────
+  // ─── Shared: high-throughput sender ───────────────────────────────────────
   async function startSendingChunks() {
-    const file = sendFileRef.current;
-    const ch   = dc.current;
+    const file = sendFileRef.current, ch = dc.current;
     if (!file || !ch) return;
-
     let offset = 0;
     const startTime = Date.now();
     ch.bufferedAmountLowThreshold = LOWWATER;
     showProgress(0, file.size, "Sending • starting…");
-    let lastUI = Date.now();
-    // Sliding window for instantaneous speed
-    let windowBytes = 0, windowStart = Date.now();
+    let lastUI = Date.now(), windowBytes = 0, windowStart = Date.now();
 
     try {
       while (offset < file.size) {
         const segEnd  = Math.min(offset + SEGMENT_SIZE, file.size);
         const segment = await file.slice(offset, segEnd).arrayBuffer();
         const view    = new Uint8Array(segment);
-        let   segPos  = 0;
-
+        let segPos    = 0;
         while (segPos < view.byteLength) {
           if (ch.bufferedAmount >= HIGHWATER) {
             await new Promise<void>((res) => {
               ch.onbufferedamountlow = () => { ch.onbufferedamountlow = null; res(); };
             });
           }
-          const end = Math.min(segPos + CHUNK_SIZE, view.byteLength);
+          const end  = Math.min(segPos + CHUNK_SIZE, view.byteLength);
           const sent = end - segPos;
           ch.send(view.subarray(segPos, end));
           offset += sent; segPos = end; windowBytes += sent;
-
           const now = Date.now();
           if (now - lastUI >= 80) {
             lastUI = now;
@@ -227,7 +225,6 @@ export default function Page() {
       addToast(`Send error: ${err instanceof Error ? err.message : String(err)}`, "error");
       hideProgress(); sendFileRef.current = null; return;
     }
-
     showProgress(file.size, file.size, "Sent ✓");
     ch.send(JSON.stringify({ type: "end" }));
     addToast("Transfer complete!", "success");
@@ -236,35 +233,110 @@ export default function Page() {
     sendFileRef.current = null;
   }
 
-  // ─── Bind raw data channel ────────────────────────────────────────────────
+  // ─── Shared: set up a raw RTCDataChannel ──────────────────────────────────
+  const setupChannel = useCallback((ch: RTCDataChannel, peerId: string) => {
+    if (connTimeout.current) clearTimeout(connTimeout.current);
+    ch.binaryType = "arraybuffer";
+    ch.onmessage = (e) => handleData(e.data);
+    ch.onclose   = () => { resetConnection(); addToast("Disconnected.", "info"); };
+    ch.onerror   = () => { addToast("Connection error.", "error"); resetConnection(); };
+    dc.current = ch;
+    setConnected(peerId);
+    setConnecting(false);
+    addToast("Connected!", "success");
+  }, [addToast, handleData, resetConnection]);
+
+  // ─── WS mode: create RTCPeerConnection ────────────────────────────────────
+  const createWsPC = useCallback((peerId: string) => {
+    rtcPcRef.current?.close();
+    const p = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    rtcPcRef.current = p;
+    p.onicecandidate = (ev) => {
+      if (ev.candidate && wsRef.current?.readyState === WebSocket.OPEN)
+        wsRef.current.send(JSON.stringify({ type: "ice", to: peerId, candidate: ev.candidate.toJSON() }));
+    };
+    p.onconnectionstatechange = () => {
+      if (p.connectionState === "failed") { addToast("Connection failed.", "error"); resetConnection(); }
+    };
+    return p;
+  }, [addToast, resetConnection]);
+
+  // ─── WS mode: signaling init ───────────────────────────────────────────────
+  const initWsMode = useCallback((url: string) => {
+    const socket = new WebSocket(url);
+    wsRef.current = socket;
+    let pendingPeerId = "";
+
+    socket.onopen = () => socket.send(JSON.stringify({ type: "register", id: myIdRef.current }));
+
+    socket.onmessage = async (e) => {
+      let msg: Record<string, unknown>;
+      try { msg = JSON.parse(e.data); } catch { return; }
+
+      switch (msg.type) {
+        case "registered":
+          setMyId(msg.id as string); myIdRef.current = msg.id as string;
+          setStatus("online"); break;
+        case "peers":
+          setPeers((msg.list as string[]).filter((id) => id !== myIdRef.current)); break;
+        case "peer-joined":
+          if (msg.id !== myIdRef.current)
+            setPeers((p) => p.includes(msg.id as string) ? p : [...p, msg.id as string]);
+          break;
+        case "peer-left":
+          setPeers((p) => p.filter((id) => id !== msg.id)); break;
+        case "offer": {
+          pendingPeerId = msg.from as string;
+          const p = createWsPC(pendingPeerId);
+          p.ondatachannel = (ev) => {
+            if (ev.channel.label === "file-transfer") setupChannel(ev.channel, pendingPeerId);
+          };
+          await p.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+          const answer = await p.createAnswer();
+          await p.setLocalDescription(answer);
+          socket.send(JSON.stringify({ type: "answer", to: pendingPeerId, sdp: answer }));
+          break;
+        }
+        case "answer":
+          if (rtcPcRef.current) await rtcPcRef.current.setRemoteDescription(
+            new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+          break;
+        case "ice":
+          if (rtcPcRef.current) try {
+            await rtcPcRef.current.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit));
+          } catch { /* ignore race */ }
+          break;
+      }
+    };
+
+    socket.onerror  = () => setStatus("error");
+    socket.onclose  = () => {
+      setStatus("error");
+      setTimeout(() => initWsMode(url), 3000);
+    };
+  }, [createWsPC, setupChannel]);
+
+  // ─── PeerJS mode: bind PeerJS DataConnection ──────────────────────────────
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const bindChannel = useCallback((conn: any, peerId: string) => {
-    connRef.current = conn;
+  const bindPeerConn = useCallback((conn: any, peerId: string) => {
+    pjsConnRef.current = conn;
     conn.on("open", () => {
-      if (connTimeout.current) clearTimeout(connTimeout.current);
       const ch: RTCDataChannel = conn.dataChannel;
-      ch.binaryType = "arraybuffer";
-      ch.onmessage  = (e: MessageEvent) => handleData(e.data);
-      dc.current = ch;
-      setConnected(peerId);
-      setConnecting(false);
-      addToast("Connected!", "success");
+      setupChannel(ch, peerId);
     });
     conn.on("close", () => { resetConnection(); addToast("Disconnected.", "info"); });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    conn.on("error", (err: any) => { addToast(`Peer error: ${err?.message ?? ""}`, "error"); resetConnection(); });
-  }, [addToast, handleData, resetConnection]);
+    conn.on("error", (err: any) => { addToast(`Error: ${err?.message ?? ""}`, "error"); resetConnection(); });
+  }, [addToast, resetConnection, setupChannel]);
 
-  // ─── LAN Hub / Client ─────────────────────────────────────────────────────
+  // ─── PeerJS mode: hub/spoke LAN discovery ─────────────────────────────────
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tryBeHub = useCallback((roomId: string, Peer: any) => {
     lanRoomId.current = roomId;
-    const hp = new Peer(roomId, { config: { iceServers: [] } });
+    const hp = new Peer(roomId, { config: { iceServers: ICE_SERVERS } });
     hubPeerRef.current = hp;
-
     hp.on("open", () => {
-      isHub.current = true;
-      setIsHubState(true);
+      isHub.current = true; setIsHubState(true);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       hp.on("connection", (conn: any) => {
         conn.on("open", () => {
@@ -292,7 +364,6 @@ export default function Page() {
         });
       });
     });
-
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     hp.on("error", (err: any) => {
       hubPeerRef.current = null; isHub.current = false; setIsHubState(false);
@@ -302,36 +373,27 @@ export default function Page() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function hubBroadcast(msg: object, excludeIds: string[] = []) {
     const raw = JSON.stringify(msg);
-    for (const [id, c] of hubClientMap.current) {
+    for (const [id, c] of hubClientMap.current)
       if (!excludeIds.includes(id)) try { c.send(raw); } catch { /* ignore */ }
-    }
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const joinHubAsClient = useCallback((roomId: string, Peer: any) => {
-    const dp = new Peer(null, { config: { iceServers: [] } });
+    const dp = new Peer(null, { config: { iceServers: ICE_SERVERS } });
     dp.on("open", () => {
       const conn = dp.connect(roomId, { reliable: true });
-      conn.on("open", () => { conn.send(JSON.stringify({ type: "hello", id: myIdRef.current })); });
+      conn.on("open", () => conn.send(JSON.stringify({ type: "hello", id: myIdRef.current })));
       conn.on("data", (raw: string) => {
         try {
           const msg = JSON.parse(raw);
-          if (msg.type === "peers") {
-            setPeers(msg.list.filter((id: string) => id !== myIdRef.current));
-          } else if (msg.type === "join" && msg.id !== myIdRef.current) {
-            setPeers((p) => p.includes(msg.id) ? p : [...p, msg.id]);
-          } else if (msg.type === "leave") {
-            setPeers((p) => p.filter((id) => id !== msg.id));
-          }
+          if (msg.type === "peers") setPeers(msg.list.filter((id: string) => id !== myIdRef.current));
+          else if (msg.type === "join" && msg.id !== myIdRef.current) setPeers((p) => p.includes(msg.id) ? p : [...p, msg.id]);
+          else if (msg.type === "leave") setPeers((p) => p.filter((id) => id !== msg.id));
         } catch { /* ignore */ }
       });
-      conn.on("close", () => {
-        dp.destroy(); setPeers([]);
-        setTimeout(() => tryBeHub(roomId, Peer), Math.random() * 2000 + 500);
-      });
+      conn.on("close", () => { dp.destroy(); setPeers([]); setTimeout(() => tryBeHub(roomId, Peer), Math.random() * 2000 + 500); });
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     dp.on("error", (err: any) => {
@@ -341,28 +403,29 @@ export default function Page() {
     });
   }, [tryBeHub]);
 
-  // ─── PeerJS initialization ────────────────────────────────────────────────
+  // ─── Initialization ────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
 
+    if (SIGNAL_SERVER) {
+      // ── WS mode: direct WebRTC, full LAN speed ──
+      initWsMode(SIGNAL_SERVER);
+      return () => { cancelled = true; wsRef.current?.close(); rtcPcRef.current?.close(); };
+    }
+
+    // ── PeerJS mode: works without any backend ──
     (async () => {
       const { default: Peer } = await import("peerjs");
       if (cancelled) return;
 
-      const p = new Peer(myIdRef.current, {
-        config: { iceServers: [] },
-      });
+      const p = new Peer(myIdRef.current, { config: { iceServers: ICE_SERVERS } });
       peerRef.current = p;
 
       p.on("open", (id: string) => {
-        myIdRef.current = id;
-        setMyId(id);
-        setStatus("online");
+        myIdRef.current = id; setMyId(id); setStatus("online");
         if (!lanRoomId.current) getLanRoomId().then((roomId) => tryBeHub(roomId, Peer));
       });
-
-      p.on("connection", (conn: unknown) => bindChannel(conn, (conn as { peer: string }).peer));
-
+      p.on("connection", (conn: unknown) => bindPeerConn(conn, (conn as { peer: string }).peer));
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       p.on("error", (err: any) => {
         const type: string = err?.type ?? "";
@@ -370,12 +433,12 @@ export default function Page() {
         else if (type === "unavailable-id") {
           myIdRef.current = genId(); setMyId(myIdRef.current);
           p.destroy(); peerRef.current = null;
-          // re-run init on next tick
           setTimeout(() => {
-            const p2 = new Peer(myIdRef.current, { config: { iceServers: [] } });
+            if (cancelled) return;
+            const p2 = new Peer(myIdRef.current, { config: { iceServers: ICE_SERVERS } });
             peerRef.current = p2;
             p2.on("open", (id: string) => { myIdRef.current = id; setMyId(id); setStatus("online"); });
-            p2.on("connection", (conn: unknown) => bindChannel(conn, (conn as { peer: string }).peer));
+            p2.on("connection", (conn: unknown) => bindPeerConn(conn, (conn as { peer: string }).peer));
           }, 200);
         } else if (type === "disconnected") {
           addToast("Lost server connection. Reconnecting…", "info");
@@ -387,25 +450,38 @@ export default function Page() {
     })();
 
     return () => { cancelled = true; peerRef.current?.destroy(); hubPeerRef.current?.destroy(); };
-  }, [addToast, bindChannel, joinHubAsClient, resetConnection, tryBeHub]);
+  }, [addToast, bindPeerConn, initWsMode, joinHubAsClient, resetConnection, tryBeHub]);
 
-  // ─── Connect to peer ──────────────────────────────────────────────────────
-  const connectToPeer = useCallback((targetId: string) => {
+  // ─── Connect to peer ───────────────────────────────────────────────────────
+  const connectToPeer = useCallback(async (targetId: string) => {
     const tid = targetId.trim().toUpperCase();
     if (tid.length < 2) { addToast("Enter a device ID.", "error"); return; }
     if (tid === myIdRef.current) { addToast("That's your own ID.", "error"); return; }
-    if (!peerRef.current) { addToast("Not ready yet. Please wait.", "error"); return; }
-
     setConnecting(true);
     connTimeout.current = setTimeout(() => {
-      if (!connRef.current?.open) { addToast("Connection timed out.", "error"); resetConnection(); }
+      if (!connectedPeer) { addToast("Connection timed out.", "error"); resetConnection(); }
     }, 15000);
 
-    const conn = peerRef.current.connect(tid, { reliable: true });
-    bindChannel(conn, tid);
-  }, [addToast, bindChannel, resetConnection]);
+    if (SIGNAL_SERVER && wsRef.current?.readyState === WebSocket.OPEN) {
+      // WS mode: create RTCPeerConnection and send offer via WebSocket
+      const p = createWsPC(tid);
+      const ch = p.createDataChannel("file-transfer", { ordered: true });
+      ch.onopen = () => setupChannel(ch, tid);
+      ch.onclose = () => { resetConnection(); addToast("Disconnected.", "info"); };
+      const offer = await p.createOffer();
+      await p.setLocalDescription(offer);
+      wsRef.current.send(JSON.stringify({ type: "offer", to: tid, sdp: offer }));
+    } else if (peerRef.current) {
+      // PeerJS mode
+      const conn = peerRef.current.connect(tid, { reliable: true });
+      bindPeerConn(conn, tid);
+    } else {
+      addToast("Not ready yet. Please wait.", "error");
+      setConnecting(false);
+    }
+  }, [addToast, bindPeerConn, connectedPeer, createWsPC, resetConnection, setupChannel]);
 
-  // ─── Accept / Decline incoming file ───────────────────────────────────────
+  // ─── Accept / Decline file ─────────────────────────────────────────────────
   const acceptFile = useCallback(async () => {
     const meta = incomingFile!;
     setIncoming(null);
@@ -431,7 +507,6 @@ export default function Page() {
     dc.current?.send(JSON.stringify({ type: "decline" }));
   }, []);
 
-  // ─── File select ──────────────────────────────────────────────────────────
   const onFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !dc.current) return;
@@ -441,26 +516,29 @@ export default function Page() {
     e.target.value = "";
   }, [addToast]);
 
-  // ─── Radar peer positions ─────────────────────────────────────────────────
   const peerPos = (i: number, total: number) => {
     const a = (i / total) * 2 * Math.PI - Math.PI / 2;
     return { left: 150 + Math.cos(a) * 115, top: 150 + Math.sin(a) * 115 };
   };
 
-  // ─── Render ───────────────────────────────────────────────────────────────
+  // ─── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen flex flex-col antialiased" style={{ fontFamily: "'Inter', sans-serif" }}>
       {/* Header */}
       <header className="w-full p-6 flex justify-between items-center z-10 relative">
         <div className="flex items-center gap-2">
           <svg xmlns="http://www.w3.org/2000/svg" className="w-8 h-8 text-sky-400" viewBox="0 0 256 256" fill="currentColor">
-            <path d="M227.31,28.69a16,16,0,0,0-22.62,0L187.31,46.06,165.19,23.94a8,8,0,0,0-11.32,11.32l7,7L128,75.1,95.13,42.26l7-7A8,8,0,0,0,90.81,23.94L68.69,46.06,51.31,28.69A16,16,0,0,0,28.69,51.31L46.06,68.69,23.94,90.81a8,8,0,0,0,11.32,11.32l7-7L75.1,128,42.26,160.87l-7-7A8,8,0,0,0,23.94,165.19l22.12,22.12L28.69,204.69a16,16,0,0,0,22.62,22.62L68.69,209.94l22.12,22.12a8,8,0,0,0,11.32-11.32l-7-7L128,180.9l32.87,32.87-7,7a8,8,0,0,0,11.32,11.32l22.12-22.12,17.38,17.38a16,16,0,0,0,22.62-22.62L209.94,187.31l22.12-22.12a8,8,0,0,0-11.32-11.32l-7,7L180.9,128l32.87-32.87,7,7a8,8,0,0,0,11.32-11.32L209.94,68.69l17.37-17.38A16,16,0,0,0,227.31,28.69ZM128,163.31,92.69,128,128,92.69,163.31,128Z"/>
+            <path d="M231.4,44.34s0,.1,0,.15l-58.2,191.94a15.88,15.88,0,0,1-14,11.51q-.69.06-1.38.06a15.86,15.86,0,0,1-14.42-9.15L107,164.15a4,4,0,0,1,.77-4.58l57.92-57.92a8,8,0,0,0-11.31-11.31L96.43,148.26a4,4,0,0,1-4.58.77L17.08,112.64a16,16,0,0,1,2.49-29.8l191.94-58.2.15,0A16,16,0,0,1,231.4,44.34Z"/>
           </svg>
           <h1 className="text-2xl font-bold tracking-tight">Local<span className="text-sky-400">Drop</span></h1>
         </div>
         <div className="flex items-center gap-3 glass-panel px-4 py-2 rounded-full text-sm font-medium">
           <div className={`w-2.5 h-2.5 rounded-full ${status === "online" ? "bg-emerald-400" : status === "error" ? "bg-red-400" : "bg-amber-400 animate-pulse"}`} />
-          <span>{status === "online" ? "Online" : status === "error" ? "Disconnected" : "Connecting..."}</span>
+          <span>
+            {status === "online"
+              ? SIGNAL_SERVER ? "Online (Direct)" : "Online (PeerJS)"
+              : status === "error" ? "Disconnected" : "Connecting..."}
+          </span>
         </div>
       </header>
 
@@ -476,8 +554,7 @@ export default function Page() {
                 const pos = peerPos(i, Math.min(peers.length, 8));
                 return (
                   <button key={id} className="device-node" style={{ left: pos.left, top: pos.top }}
-                    title={`Connect to ${id}`}
-                    onClick={() => { setTarget(id); connectToPeer(id); }}>
+                    title={`Connect to ${id}`} onClick={() => { setTarget(id); connectToPeer(id); }}>
                     <div className="icon-ring">
                       <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="#38bdf8" viewBox="0 0 256 256">
                         <path d="M176,16H80A24,24,0,0,0,56,40V216a24,24,0,0,0,24,24h96a24,24,0,0,0,24-24V40A24,24,0,0,0,176,16ZM112,32h32a8,8,0,0,1,0,16H112a8,8,0,0,1,0-16Zm16,192a16,16,0,1,1,16-16A16,16,0,0,1,128,224Z"/>
@@ -488,7 +565,6 @@ export default function Page() {
                   </button>
                 );
               })}
-              {/* Self node */}
               <div className="w-20 h-20 bg-slate-800 rounded-full flex items-center justify-center z-10 shadow-xl border border-slate-600 relative">
                 <svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" fill="#cbd5e1" viewBox="0 0 256 256">
                   <path d="M232,168H208V112a24,24,0,0,0-24-24H152V56a24,24,0,0,0-24-24H72A24,24,0,0,0,48,56V168H24a8,8,0,0,0,0,16H64v8a24,24,0,0,0,24,24h80a24,24,0,0,0,24-24v-8h40a8,8,0,0,0,0-16Z"/>
@@ -503,7 +579,7 @@ export default function Page() {
                   ? <><span style={{ color: "#a78bfa", fontWeight: 600 }}>Hub active</span>&nbsp;— waiting for other devices</>
                   : <><SpinnerIcon /> Scanning for nearby devices…</>
                 : isHubState
-                  ? <><span style={{ color: "#a78bfa", fontWeight: 600 }}>Hub</span>&nbsp;— {peers.length} device{peers.length > 1 ? "s" : ""} connected — click to send</>
+                  ? <><span style={{ color: "#a78bfa", fontWeight: 600 }}>Hub</span>&nbsp;— {peers.length} device{peers.length > 1 ? "s" : ""} connected</>
                   : <><span style={{ color: "#34d399", fontWeight: 600 }}>{peers.length} device{peers.length > 1 ? "s" : ""} nearby</span>&nbsp;— click to connect</>
               }
             </p>
@@ -565,7 +641,6 @@ export default function Page() {
                   <input type="file" className="hidden" onChange={onFileSelect} />
                 </label>
               </div>
-
               {progress && (
                 <div className="w-full mt-8 bg-slate-800 p-5 rounded-2xl border border-slate-600 shadow-inner relative z-10">
                   <div className="flex justify-between text-sm mb-3 font-medium">
@@ -642,9 +717,7 @@ export default function Page() {
             t.type === "error" ? "bg-red-950 border-red-900 text-red-100" :
             t.type === "success" ? "bg-emerald-950 border-emerald-900 text-emerald-100" :
             "bg-slate-800 border-slate-700 text-white"
-          }`}>
-            {t.msg}
-          </div>
+          }`}>{t.msg}</div>
         ))}
       </div>
     </div>
