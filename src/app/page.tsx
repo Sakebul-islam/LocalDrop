@@ -30,7 +30,7 @@ interface FileMeta{ name: string; size: number; mime: string; }
 // ─── LAN room ID from ICE candidates ─────────────────────────────────────────
 async function getLanRoomId(): Promise<string> {
   return new Promise((resolve) => {
-    const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    const pc = new RTCPeerConnection({ iceServers: [] });
     pc.createDataChannel("x");
     pc.createOffer().then((o) => pc.setLocalDescription(o)).catch(() => resolve("LDROPNET0"));
 
@@ -86,6 +86,8 @@ export default function Page() {
   const receivedSize     = useRef(0);
   const receiveStartTime = useRef(0);
   const lastReceiveUI    = useRef(0);
+  const recvWindowBytes  = useRef(0);
+  const recvWindowStart  = useRef(0);
 
   // UI state
   const [myId, setMyId]             = useState(myIdRef.current);
@@ -163,13 +165,18 @@ export default function Page() {
     } else {
       const buf: ArrayBuffer = data instanceof Blob ? await data.arrayBuffer() : data as ArrayBuffer;
       receivedSize.current += buf.byteLength;
+      recvWindowBytes.current += buf.byteLength;
       const now = Date.now();
       if (now - lastReceiveUI.current >= 80) {
         lastReceiveUI.current = now;
-        const elapsed = (now - receiveStartTime.current) / 1000 || 0.001;
-        showProgress(receivedSize.current, receiveMeta.current!.size, `Receiving • ${formatBytes(receivedSize.current / elapsed)}/s`);
+        const windowSec = (now - recvWindowStart.current) / 1000 || 0.001;
+        const speed = windowSec >= 0.4
+          ? recvWindowBytes.current / windowSec
+          : receivedSize.current / ((now - receiveStartTime.current) / 1000 || 0.001);
+        if (windowSec >= 0.4) { recvWindowBytes.current = 0; recvWindowStart.current = now; }
+        showProgress(receivedSize.current, receiveMeta.current!.size, `Receiving • ${formatBytes(speed)}/s`);
       }
-      if (receiveStream.current) await receiveStream.current.write(buf);
+      if (receiveStream.current) void receiveStream.current.write(buf);
       else receiveBuffer.current.push(buf);
     }
   }, [addLog, addToast, hideProgress, showProgress]);
@@ -185,6 +192,8 @@ export default function Page() {
     ch.bufferedAmountLowThreshold = LOWWATER;
     showProgress(0, file.size, "Sending • starting…");
     let lastUI = Date.now();
+    // Sliding window for instantaneous speed
+    let windowBytes = 0, windowStart = Date.now();
 
     try {
       while (offset < file.size) {
@@ -200,13 +209,17 @@ export default function Page() {
             });
           }
           const end = Math.min(segPos + CHUNK_SIZE, view.byteLength);
+          const sent = end - segPos;
           ch.send(view.subarray(segPos, end));
-          offset += end - segPos; segPos = end;
+          offset += sent; segPos = end; windowBytes += sent;
 
           const now = Date.now();
           if (now - lastUI >= 80) {
             lastUI = now;
-            showProgress(offset, file.size, `Sending • ${formatBytes(offset / ((now - startTime) / 1000 || 0.001))}/s`);
+            const windowSec = (now - windowStart) / 1000 || 0.001;
+            const speed = windowSec >= 0.4 ? windowBytes / windowSec : offset / ((now - startTime) / 1000 || 0.001);
+            if (windowSec >= 0.4) { windowBytes = 0; windowStart = now; }
+            showProgress(offset, file.size, `Sending • ${formatBytes(speed)}/s`);
           }
         }
       }
@@ -246,7 +259,7 @@ export default function Page() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tryBeHub = useCallback((roomId: string, Peer: any) => {
     lanRoomId.current = roomId;
-    const hp = new Peer(roomId, { config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] } });
+    const hp = new Peer(roomId, { config: { iceServers: [] } });
     hubPeerRef.current = hp;
 
     hp.on("open", () => {
@@ -299,7 +312,7 @@ export default function Page() {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const joinHubAsClient = useCallback((roomId: string, Peer: any) => {
-    const dp = new Peer(null, { config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] } });
+    const dp = new Peer(null, { config: { iceServers: [] } });
     dp.on("open", () => {
       const conn = dp.connect(roomId, { reliable: true });
       conn.on("open", () => { conn.send(JSON.stringify({ type: "hello", id: myIdRef.current })); });
@@ -337,7 +350,7 @@ export default function Page() {
       if (cancelled) return;
 
       const p = new Peer(myIdRef.current, {
-        config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
+        config: { iceServers: [] },
       });
       peerRef.current = p;
 
@@ -359,7 +372,7 @@ export default function Page() {
           p.destroy(); peerRef.current = null;
           // re-run init on next tick
           setTimeout(() => {
-            const p2 = new Peer(myIdRef.current, { config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] } });
+            const p2 = new Peer(myIdRef.current, { config: { iceServers: [] } });
             peerRef.current = p2;
             p2.on("open", (id: string) => { myIdRef.current = id; setMyId(id); setStatus("online"); });
             p2.on("connection", (conn: unknown) => bindChannel(conn, (conn as { peer: string }).peer));
@@ -407,6 +420,7 @@ export default function Page() {
         else addToast("Buffering in RAM (no File System API).", "info");
       }
       receivedSize.current = 0; receiveStartTime.current = Date.now(); lastReceiveUI.current = 0;
+      recvWindowBytes.current = 0; recvWindowStart.current = Date.now();
       showProgress(0, meta.size, "Receiving • connecting...");
       dc.current?.send(JSON.stringify({ type: "accept" }));
     } catch { dc.current?.send(JSON.stringify({ type: "decline" })); }
