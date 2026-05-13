@@ -4,7 +4,8 @@
       "Bash(npm run *)",
       "Bash(node server.js)",
       "Bash(curl -s http://localhost:3000)",
-      "Bash(grep -v \"^$\")"
+      "Bash(grep -v \"^$\")",
+      "Bash(npm install *)"
     ]
   }
 }

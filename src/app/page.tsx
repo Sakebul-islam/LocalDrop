@@ -3,18 +3,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const CHUNK_SIZE   = 64  * 1024;        // 64 KB — safe SCTP message size
-const SEGMENT_SIZE = 16  * 1024 * 1024; // 16 MB read per await
-const HIGHWATER    = 4   * 1024 * 1024; // pause when buffer > 4 MB
-const LOWWATER     = 256 * 1024;        // resume when buffer < 256 KB
-
-const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+const CHUNK_SIZE   = 64  * 1024;
+const SEGMENT_SIZE = 16  * 1024 * 1024;
+const HIGHWATER    = 4   * 1024 * 1024;
+const LOWWATER     = 256 * 1024;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function genId() {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const c = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   let r = "";
-  for (let i = 0; i < 5; i++) r += chars[Math.floor(Math.random() * chars.length)];
+  for (let i = 0; i < 5; i++) r += c[Math.floor(Math.random() * c.length)];
   return r;
 }
 
@@ -25,21 +23,62 @@ function formatBytes(b: number) {
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-interface Toast { id: number; msg: string; type: "info" | "success" | "error"; }
-interface LogEntry { id: number; direction: "Sent" | "Received"; name: string; size: number; url?: string; }
-interface FileMeta { name: string; size: number; mime: string; }
+interface Toast   { id: number; msg: string; type: "info"|"success"|"error"; }
+interface LogEntry{ id: number; direction: "Sent"|"Received"; name: string; size: number; url?: string; }
+interface FileMeta{ name: string; size: number; mime: string; }
+
+// ─── LAN room ID from ICE candidates ─────────────────────────────────────────
+async function getLanRoomId(): Promise<string> {
+  return new Promise((resolve) => {
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    pc.createDataChannel("x");
+    pc.createOffer().then((o) => pc.setLocalDescription(o)).catch(() => resolve("LDROPNET0"));
+
+    let found: string | null = null, done = false;
+    const finish = (id: string) => { if (!done) { done = true; pc.close(); resolve(id); } };
+    setTimeout(() => finish(found ?? "LDROPNET0"), 4000);
+
+    const hash = (s: string) => {
+      let h = 0;
+      for (const c of s) h = (Math.imul(31, h) + c.charCodeAt(0)) | 0;
+      return "LD" + Math.abs(h).toString(36).toUpperCase().slice(0, 5);
+    };
+
+    pc.onicecandidate = ({ candidate }) => {
+      if (!candidate) { finish(found ?? "LDROPNET0"); return; }
+      const parts = candidate.candidate.split(" ");
+      const ip = parts[4], type = parts[7];
+      if (type === "host" && /^(\d+\.){3}\d+$/.test(ip) && !ip.startsWith("127.")) {
+        finish(hash(ip.split(".").slice(0, 3).join(".")));
+      } else if (type === "srflx" && /^(\d+\.){3}\d+$/.test(ip) && !found) {
+        found = hash(ip);
+        setTimeout(() => finish(found!), 600);
+      }
+    };
+  });
+}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function Page() {
-  const myId = useRef(genId());
+  const myIdRef = useRef(genId());
 
-  // Connection state
-  const ws         = useRef<WebSocket | null>(null);
-  const pc         = useRef<RTCPeerConnection | null>(null);
+  // PeerJS refs (any — PeerJS loaded dynamically)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const peerRef    = useRef<any>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const connRef    = useRef<any>(null);  // active PeerJS DataConnection
   const dc         = useRef<RTCDataChannel | null>(null);
-  const connTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connTimeout= useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Transfer state (refs to avoid stale closures in async loops)
+  // Hub/spoke LAN discovery
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const hubPeerRef    = useRef<any>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const hubClientMap  = useRef(new Map<string, any>());
+  const lanRoomId     = useRef<string | null>(null);
+  const isHub         = useRef(false);
+
+  // Transfer state
   const sendFileRef      = useRef<File | null>(null);
   const receiveMeta      = useRef<FileMeta | null>(null);
   const receiveStream    = useRef<FileSystemWritableFileStream | null>(null);
@@ -49,15 +88,17 @@ export default function Page() {
   const lastReceiveUI    = useRef(0);
 
   // UI state
-  const [status, setStatus]           = useState<"connecting" | "online" | "error">("connecting");
-  const [connectedPeer, setConnected] = useState<string | null>(null);
-  const [peers, setPeers]             = useState<string[]>([]);
-  const [toasts, setToasts]           = useState<Toast[]>([]);
-  const [logs, setLogs]               = useState<LogEntry[]>([]);
-  const [targetInput, setTarget]      = useState("");
-  const [connecting, setConnecting]   = useState(false);
-  const [incomingFile, setIncoming]   = useState<FileMeta | null>(null);
-  const [progress, setProgress]       = useState<{ pct: number; label: string } | null>(null);
+  const [myId, setMyId]             = useState(myIdRef.current);
+  const [status, setStatus]         = useState<"connecting"|"online"|"error">("connecting");
+  const [connectedPeer, setConnected]= useState<string | null>(null);
+  const [peers, setPeers]           = useState<string[]>([]);
+  const [toasts, setToasts]         = useState<Toast[]>([]);
+  const [logs, setLogs]             = useState<LogEntry[]>([]);
+  const [targetInput, setTarget]    = useState("");
+  const [connecting, setConnecting] = useState(false);
+  const [incomingFile, setIncoming] = useState<FileMeta | null>(null);
+  const [progress, setProgress]     = useState<{ pct: number; label: string } | null>(null);
+  const [isHubState, setIsHubState] = useState(false);
 
   const toastId = useRef(0);
   const logId   = useRef(0);
@@ -69,39 +110,35 @@ export default function Page() {
   }, []);
 
   const addLog = useCallback((direction: LogEntry["direction"], name: string, size: number, url?: string) => {
-    const id = ++logId.current;
-    setLogs((l) => [{ id, direction, name, size, url }, ...l]);
+    setLogs((l) => [{ id: ++logId.current, direction, name, size, url }, ...l]);
   }, []);
 
-  // ─── Progress helpers ──────────────────────────────────────────────────────
   const showProgress = useCallback((current: number, total: number, label: string) => {
     setProgress({ pct: Math.min(100, Math.round((current / total) * 100)), label });
   }, []);
 
   const hideProgress = useCallback(() => setProgress(null), []);
 
-  // ─── Close / reset connection ──────────────────────────────────────────────
   const resetConnection = useCallback(() => {
-    dc.current?.close();
-    pc.current?.close();
+    connRef.current?.close();
+    connRef.current = null;
     dc.current = null;
-    pc.current = null;
     if (connTimeout.current) clearTimeout(connTimeout.current);
     setConnected(null);
     setConnecting(false);
     hideProgress();
   }, [hideProgress]);
 
-  // ─── Data channel message handler ─────────────────────────────────────────
-  const handleData = useCallback(async (data: MessageEvent["data"]) => {
+  // ─── Data handler ──────────────────────────────────────────────────────────
+  const handleData = useCallback(async (data: unknown) => {
     if (typeof data === "string") {
       let msg: Record<string, unknown>;
-      try { msg = JSON.parse(data); } catch { return; }
+      try { msg = JSON.parse(data as string); } catch { return; }
 
       if (msg.type === "header") {
-        const meta = msg as unknown as FileMeta & { type: string };
-        receiveMeta.current = { name: meta.name, size: meta.size, mime: meta.mime };
-        setIncoming({ name: meta.name, size: meta.size, mime: meta.mime });
+        const m = msg as unknown as FileMeta & { type: string };
+        receiveMeta.current = { name: m.name, size: m.size, mime: m.mime };
+        setIncoming({ name: m.name, size: m.size, mime: m.mime });
       } else if (msg.type === "accept") {
         addToast("Accepted! Sending…", "success");
         startSendingChunks();
@@ -116,33 +153,22 @@ export default function Page() {
           addToast(`Saved ${meta.name}!`, "success");
         } else {
           const blob = new Blob(receiveBuffer.current, { type: meta.mime });
-          const url  = URL.createObjectURL(blob);
-          addLog("Received", meta.name, meta.size, url);
+          addLog("Received", meta.name, meta.size, URL.createObjectURL(blob));
           addToast(`${meta.name} ready — click Download!`, "success");
         }
         showProgress(meta.size, meta.size, "Received ✓");
         setTimeout(hideProgress, 1200);
-        receiveMeta.current    = null;
-        receiveBuffer.current  = [];
-        receiveStream.current  = null;
-        receivedSize.current   = 0;
+        receiveMeta.current = null; receiveBuffer.current = []; receiveStream.current = null; receivedSize.current = 0;
       }
     } else {
-      // Binary chunk
-      const buf: ArrayBuffer = data instanceof Blob ? await data.arrayBuffer() : data;
+      const buf: ArrayBuffer = data instanceof Blob ? await data.arrayBuffer() : data as ArrayBuffer;
       receivedSize.current += buf.byteLength;
-
       const now = Date.now();
       if (now - lastReceiveUI.current >= 80) {
         lastReceiveUI.current = now;
         const elapsed = (now - receiveStartTime.current) / 1000 || 0.001;
-        showProgress(
-          receivedSize.current,
-          receiveMeta.current!.size,
-          `Receiving • ${formatBytes(receivedSize.current / elapsed)}/s`
-        );
+        showProgress(receivedSize.current, receiveMeta.current!.size, `Receiving • ${formatBytes(receivedSize.current / elapsed)}/s`);
       }
-
       if (receiveStream.current) await receiveStream.current.write(buf);
       else receiveBuffer.current.push(buf);
     }
@@ -150,13 +176,13 @@ export default function Page() {
 
   // ─── High-throughput sender ────────────────────────────────────────────────
   async function startSendingChunks() {
-    const file    = sendFileRef.current;
-    const channel = dc.current;
-    if (!file || !channel) return;
+    const file = sendFileRef.current;
+    const ch   = dc.current;
+    if (!file || !ch) return;
 
-    let offset    = 0;
+    let offset = 0;
     const startTime = Date.now();
-    channel.bufferedAmountLowThreshold = LOWWATER;
+    ch.bufferedAmountLowThreshold = LOWWATER;
     showProgress(0, file.size, "Sending • starting…");
     let lastUI = Date.now();
 
@@ -168,193 +194,205 @@ export default function Page() {
         let   segPos  = 0;
 
         while (segPos < view.byteLength) {
-          if (channel.bufferedAmount >= HIGHWATER) {
-            await new Promise<void>((resolve) => {
-              channel.onbufferedamountlow = () => {
-                channel.onbufferedamountlow = null;
-                resolve();
-              };
+          if (ch.bufferedAmount >= HIGHWATER) {
+            await new Promise<void>((res) => {
+              ch.onbufferedamountlow = () => { ch.onbufferedamountlow = null; res(); };
             });
           }
           const end = Math.min(segPos + CHUNK_SIZE, view.byteLength);
-          channel.send(view.subarray(segPos, end));
-          offset  += end - segPos;
-          segPos   = end;
+          ch.send(view.subarray(segPos, end));
+          offset += end - segPos; segPos = end;
 
           const now = Date.now();
           if (now - lastUI >= 80) {
             lastUI = now;
-            const elapsed = (now - startTime) / 1000 || 0.001;
-            showProgress(offset, file.size, `Sending • ${formatBytes(offset / elapsed)}/s`);
+            showProgress(offset, file.size, `Sending • ${formatBytes(offset / ((now - startTime) / 1000 || 0.001))}/s`);
           }
         }
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      addToast(`Send error: ${msg}`, "error");
-      hideProgress();
-      sendFileRef.current = null;
-      return;
+      addToast(`Send error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      hideProgress(); sendFileRef.current = null; return;
     }
 
     showProgress(file.size, file.size, "Sent ✓");
-    channel.send(JSON.stringify({ type: "end" }));
+    ch.send(JSON.stringify({ type: "end" }));
     addToast("Transfer complete!", "success");
     addLog("Sent", file.name, file.size);
     setTimeout(hideProgress, 1200);
     sendFileRef.current = null;
   }
 
-  // ─── WebRTC setup ──────────────────────────────────────────────────────────
-  const setupDataChannel = useCallback((channel: RTCDataChannel, peerId: string) => {
-    dc.current = channel;
-    channel.binaryType = "arraybuffer";
-    channel.onopen = () => {
+  // ─── Bind raw data channel ────────────────────────────────────────────────
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const bindChannel = useCallback((conn: any, peerId: string) => {
+    connRef.current = conn;
+    conn.on("open", () => {
       if (connTimeout.current) clearTimeout(connTimeout.current);
-      addToast("Connected!", "success");
+      const ch: RTCDataChannel = conn.dataChannel;
+      ch.binaryType = "arraybuffer";
+      ch.onmessage  = (e: MessageEvent) => handleData(e.data);
+      dc.current = ch;
       setConnected(peerId);
       setConnecting(false);
-    };
-    channel.onmessage = (e) => handleData(e.data);
-    channel.onclose   = () => { resetConnection(); addToast("Disconnected.", "info"); };
-    channel.onerror   = () => { resetConnection(); addToast("Connection error.", "error"); };
+      addToast("Connected!", "success");
+    });
+    conn.on("close", () => { resetConnection(); addToast("Disconnected.", "info"); });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    conn.on("error", (err: any) => { addToast(`Peer error: ${err?.message ?? ""}`, "error"); resetConnection(); });
   }, [addToast, handleData, resetConnection]);
 
-  const createPeerConnection = useCallback(() => {
-    const p = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    pc.current = p;
-    p.onicecandidate = (e) => {
-      if (e.candidate && ws.current?.readyState === WebSocket.OPEN) {
-        ws.current.send(JSON.stringify({
-          type: "ice",
-          to: connectedPeer || targetInput.toUpperCase(),
-          candidate: e.candidate.toJSON(),
-        }));
-      }
-    };
-    p.onconnectionstatechange = () => {
-      if (p.connectionState === "failed") {
-        addToast("Connection failed.", "error");
-        resetConnection();
-      }
-    };
-    return p;
-  }, [addToast, connectedPeer, resetConnection, targetInput]);
+  // ─── LAN Hub / Client ─────────────────────────────────────────────────────
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tryBeHub = useCallback((roomId: string, Peer: any) => {
+    lanRoomId.current = roomId;
+    const hp = new Peer(roomId, { config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] } });
+    hubPeerRef.current = hp;
 
-  // ─── WebSocket connect & signaling ────────────────────────────────────────
-  useEffect(() => {
-    const proto = window.location.protocol === "https:" ? "wss" : "ws";
-    const socket = new WebSocket(`${proto}://${window.location.host}/ws`);
-    ws.current = socket;
-    // Track the remote peer we're establishing a connection with
-    let pendingPeerId = "";
-
-    socket.onopen = () => {
-      socket.send(JSON.stringify({ type: "register", id: myId.current }));
-    };
-
-    socket.onmessage = async (e) => {
-      let msg: Record<string, unknown>;
-      try { msg = JSON.parse(e.data); } catch { return; }
-
-      switch (msg.type) {
-        case "registered":
-          setStatus("online");
-          break;
-
-        case "peers":
-          setPeers((msg.list as string[]).filter((id) => id !== myId.current));
-          break;
-
-        case "peer-joined":
-          if (msg.id !== myId.current)
-            setPeers((p) => p.includes(msg.id as string) ? p : [...p, msg.id as string]);
-          break;
-
-        case "peer-left":
-          setPeers((p) => p.filter((id) => id !== msg.id));
-          break;
-
-        case "offer": {
-          // Inbound call — create PC as answerer
-          pendingPeerId = msg.from as string;
-          const p = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-          pc.current = p;
-          p.onicecandidate = (ev) => {
-            if (ev.candidate && socket.readyState === WebSocket.OPEN)
-              socket.send(JSON.stringify({ type: "ice", to: pendingPeerId, candidate: ev.candidate.toJSON() }));
-          };
-          p.ondatachannel = (ev) => setupDataChannel(ev.channel, pendingPeerId);
-          p.onconnectionstatechange = () => {
-            if (p.connectionState === "failed") { addToast("Connection failed.", "error"); resetConnection(); }
-          };
-          await p.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
-          const answer = await p.createAnswer();
-          await p.setLocalDescription(answer);
-          socket.send(JSON.stringify({ type: "answer", to: pendingPeerId, sdp: answer }));
-          break;
-        }
-
-        case "answer":
-          if (pc.current) {
-            await pc.current.setRemoteDescription(
-              new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
-            );
-          }
-          break;
-
-        case "ice":
-          if (pc.current) {
+    hp.on("open", () => {
+      isHub.current = true;
+      setIsHubState(true);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      hp.on("connection", (conn: any) => {
+        conn.on("open", () => {
+          conn.on("data", (raw: string) => {
             try {
-              await pc.current.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit));
-            } catch (_) {}
-          }
-          break;
-      }
-    };
+              const msg = JSON.parse(raw);
+              if (msg.type === "hello") {
+                const clientId: string = msg.id;
+                hubClientMap.current.set(clientId, conn);
+                const list = [myIdRef.current, ...Array.from(hubClientMap.current.keys())].filter((id) => id !== clientId);
+                conn.send(JSON.stringify({ type: "peers", list }));
+                hubBroadcast({ type: "join", id: clientId }, [clientId]);
+                setPeers((p) => p.includes(clientId) ? p : [...p, clientId]);
+              }
+            } catch { /* ignore */ }
+          });
+          conn.on("close", () => {
+            let leftId: string | null = null;
+            for (const [id, c] of hubClientMap.current) { if (c === conn) { leftId = id; break; } }
+            if (!leftId) return;
+            hubClientMap.current.delete(leftId);
+            setPeers((p) => p.filter((id) => id !== leftId));
+            hubBroadcast({ type: "leave", id: leftId });
+          });
+        });
+      });
+    });
 
-    socket.onerror = () => setStatus("error");
-    socket.onclose = () => {
-      setStatus("error");
-      // Reconnect after 3 s
-      setTimeout(() => {
-        const s2 = new WebSocket(`${proto}://${window.location.host}/ws`);
-        ws.current = s2;
-        s2.onopen = () => {
-          s2.send(JSON.stringify({ type: "register", id: myId.current }));
-          setStatus("online");
-        };
-        s2.onmessage = socket.onmessage;
-        s2.onerror   = socket.onerror;
-        s2.onclose   = socket.onclose;
-      }, 3000);
-    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    hp.on("error", (err: any) => {
+      hubPeerRef.current = null; isHub.current = false; setIsHubState(false);
+      if (err.type === "unavailable-id") joinHubAsClient(roomId, Peer);
+      else setTimeout(() => tryBeHub(roomId, Peer), 3000 + Math.random() * 2000);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    return () => socket.close();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ─── Initiate outgoing connection ─────────────────────────────────────────
-  const connectToPeer = useCallback(async (targetId: string) => {
-    if (!targetId || targetId.length < 2) { addToast("Enter a device ID.", "error"); return; }
-    if (targetId === myId.current) { addToast("That's your own ID.", "error"); return; }
-    if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
-      addToast("Not connected to server yet. Please wait.", "error"); return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function hubBroadcast(msg: object, excludeIds: string[] = []) {
+    const raw = JSON.stringify(msg);
+    for (const [id, c] of hubClientMap.current) {
+      if (!excludeIds.includes(id)) try { c.send(raw); } catch { /* ignore */ }
     }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const joinHubAsClient = useCallback((roomId: string, Peer: any) => {
+    const dp = new Peer(null, { config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] } });
+    dp.on("open", () => {
+      const conn = dp.connect(roomId, { reliable: true });
+      conn.on("open", () => { conn.send(JSON.stringify({ type: "hello", id: myIdRef.current })); });
+      conn.on("data", (raw: string) => {
+        try {
+          const msg = JSON.parse(raw);
+          if (msg.type === "peers") {
+            setPeers(msg.list.filter((id: string) => id !== myIdRef.current));
+          } else if (msg.type === "join" && msg.id !== myIdRef.current) {
+            setPeers((p) => p.includes(msg.id) ? p : [...p, msg.id]);
+          } else if (msg.type === "leave") {
+            setPeers((p) => p.filter((id) => id !== msg.id));
+          }
+        } catch { /* ignore */ }
+      });
+      conn.on("close", () => {
+        dp.destroy(); setPeers([]);
+        setTimeout(() => tryBeHub(roomId, Peer), Math.random() * 2000 + 500);
+      });
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    dp.on("error", (err: any) => {
+      dp.destroy();
+      if (err.type === "peer-unavailable") setTimeout(() => tryBeHub(roomId, Peer), Math.random() * 1500 + 300);
+      else setTimeout(() => joinHubAsClient(roomId, Peer), 3000);
+    });
+  }, [tryBeHub]);
+
+  // ─── PeerJS initialization ────────────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const { default: Peer } = await import("peerjs");
+      if (cancelled) return;
+
+      const p = new Peer(myIdRef.current, {
+        config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
+      });
+      peerRef.current = p;
+
+      p.on("open", (id: string) => {
+        myIdRef.current = id;
+        setMyId(id);
+        setStatus("online");
+        if (!lanRoomId.current) getLanRoomId().then((roomId) => tryBeHub(roomId, Peer));
+      });
+
+      p.on("connection", (conn: unknown) => bindChannel(conn, (conn as { peer: string }).peer));
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      p.on("error", (err: any) => {
+        const type: string = err?.type ?? "";
+        if (type === "peer-unavailable") { addToast("Device not found.", "error"); resetConnection(); }
+        else if (type === "unavailable-id") {
+          myIdRef.current = genId(); setMyId(myIdRef.current);
+          p.destroy(); peerRef.current = null;
+          // re-run init on next tick
+          setTimeout(() => {
+            const p2 = new Peer(myIdRef.current, { config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] } });
+            peerRef.current = p2;
+            p2.on("open", (id: string) => { myIdRef.current = id; setMyId(id); setStatus("online"); });
+            p2.on("connection", (conn: unknown) => bindChannel(conn, (conn as { peer: string }).peer));
+          }, 200);
+        } else if (type === "disconnected") {
+          addToast("Lost server connection. Reconnecting…", "info");
+        } else {
+          addToast(`Connection error (${type || "unknown"}).`, "error");
+          if (!dc.current) resetConnection();
+        }
+      });
+    })();
+
+    return () => { cancelled = true; peerRef.current?.destroy(); hubPeerRef.current?.destroy(); };
+  }, [addToast, bindChannel, joinHubAsClient, resetConnection, tryBeHub]);
+
+  // ─── Connect to peer ──────────────────────────────────────────────────────
+  const connectToPeer = useCallback((targetId: string) => {
+    const tid = targetId.trim().toUpperCase();
+    if (tid.length < 2) { addToast("Enter a device ID.", "error"); return; }
+    if (tid === myIdRef.current) { addToast("That's your own ID.", "error"); return; }
+    if (!peerRef.current) { addToast("Not ready yet. Please wait.", "error"); return; }
+
     setConnecting(true);
     connTimeout.current = setTimeout(() => {
-      if (!connectedPeer) { addToast("Connection timed out.", "error"); resetConnection(); }
+      if (!connRef.current?.open) { addToast("Connection timed out.", "error"); resetConnection(); }
     }, 15000);
 
-    const p = createPeerConnection();
-    const channel = p.createDataChannel("file-transfer", { ordered: true });
-    setupDataChannel(channel, targetId);
+    const conn = peerRef.current.connect(tid, { reliable: true });
+    bindChannel(conn, tid);
+  }, [addToast, bindChannel, resetConnection]);
 
-    const offer = await p.createOffer();
-    await p.setLocalDescription(offer);
-    ws.current?.send(JSON.stringify({ type: "offer", to: targetId, sdp: offer }));
-  }, [addToast, connectedPeer, createPeerConnection, resetConnection, setupDataChannel]);
-
-  // ─── Accept / decline incoming file ───────────────────────────────────────
+  // ─── Accept / Decline incoming file ───────────────────────────────────────
   const acceptFile = useCallback(async () => {
     const meta = incomingFile!;
     setIncoming(null);
@@ -365,19 +403,13 @@ export default function Page() {
         receiveStream.current = await handle.createWritable();
       } else {
         receiveBuffer.current = [];
-        if (meta.size > 500 * 1024 * 1024)
-          addToast("Warning: >500 MB may crash non-Chrome browsers.", "error");
-        else
-          addToast("Buffering in RAM (no File System API).", "info");
+        if (meta.size > 500 * 1024 * 1024) addToast("Warning: >500 MB may crash non-Chrome browsers.", "error");
+        else addToast("Buffering in RAM (no File System API).", "info");
       }
-      receivedSize.current   = 0;
-      receiveStartTime.current = Date.now();
-      lastReceiveUI.current  = 0;
+      receivedSize.current = 0; receiveStartTime.current = Date.now(); lastReceiveUI.current = 0;
       showProgress(0, meta.size, "Receiving • connecting...");
       dc.current?.send(JSON.stringify({ type: "accept" }));
-    } catch {
-      dc.current?.send(JSON.stringify({ type: "decline" }));
-    }
+    } catch { dc.current?.send(JSON.stringify({ type: "decline" })); }
   }, [addToast, incomingFile, showProgress]);
 
   const declineFile = useCallback(() => {
@@ -385,7 +417,7 @@ export default function Page() {
     dc.current?.send(JSON.stringify({ type: "decline" }));
   }, []);
 
-  // ─── File select handler ───────────────────────────────────────────────────
+  // ─── File select ──────────────────────────────────────────────────────────
   const onFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !dc.current) return;
@@ -395,13 +427,11 @@ export default function Page() {
     e.target.value = "";
   }, [addToast]);
 
-  // ─── Radar helpers ────────────────────────────────────────────────────────
-  function peerPosition(i: number, total: number) {
-    const angle = (i / total) * 2 * Math.PI - Math.PI / 2;
-    const orbit = 115;
-    const cx = 150, cy = 150;
-    return { left: cx + Math.cos(angle) * orbit, top: cy + Math.sin(angle) * orbit };
-  }
+  // ─── Radar peer positions ─────────────────────────────────────────────────
+  const peerPos = (i: number, total: number) => {
+    const a = (i / total) * 2 * Math.PI - Math.PI / 2;
+    return { left: 150 + Math.cos(a) * 115, top: 150 + Math.sin(a) * 115 };
+  };
 
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
@@ -415,27 +445,21 @@ export default function Page() {
           <h1 className="text-2xl font-bold tracking-tight">Local<span className="text-sky-400">Drop</span></h1>
         </div>
         <div className="flex items-center gap-3 glass-panel px-4 py-2 rounded-full text-sm font-medium">
-          <div className={`w-2.5 h-2.5 rounded-full ${
-            status === "online" ? "bg-emerald-400" : status === "error" ? "bg-red-400" : "bg-amber-400 animate-pulse"
-          }`} />
+          <div className={`w-2.5 h-2.5 rounded-full ${status === "online" ? "bg-emerald-400" : status === "error" ? "bg-red-400" : "bg-amber-400 animate-pulse"}`} />
           <span>{status === "online" ? "Online" : status === "error" ? "Disconnected" : "Connecting..."}</span>
         </div>
       </header>
 
       <main className="flex-1 flex flex-col items-center justify-center p-4 z-10 relative w-full max-w-4xl mx-auto">
         {!connectedPeer ? (
-          /* ── Discovery view ── */
           <div className="flex flex-col items-center w-full">
+            {/* Radar */}
             <div className="radar-container mb-4">
-              <div className="radar-circle" />
-              <div className="radar-circle" />
-              <div className="radar-circle" />
-              {/* Orbit ring */}
+              <div className="radar-circle" /><div className="radar-circle" /><div className="radar-circle" />
               <div className="absolute rounded-full border border-dashed border-slate-700/50 pointer-events-none"
                 style={{ width: 230, height: 230, top: "50%", left: "50%", transform: "translate(-50%,-50%)" }} />
-              {/* Peer nodes */}
               {peers.slice(0, 8).map((id, i) => {
-                const pos = peerPosition(i, Math.min(peers.length, 8));
+                const pos = peerPos(i, Math.min(peers.length, 8));
                 return (
                   <button key={id} className="device-node" style={{ left: pos.left, top: pos.top }}
                     title={`Connect to ${id}`}
@@ -450,44 +474,40 @@ export default function Page() {
                   </button>
                 );
               })}
-              {/* Self */}
+              {/* Self node */}
               <div className="w-20 h-20 bg-slate-800 rounded-full flex items-center justify-center z-10 shadow-xl border border-slate-600 relative">
                 <svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" fill="#cbd5e1" viewBox="0 0 256 256">
                   <path d="M232,168H208V112a24,24,0,0,0-24-24H152V56a24,24,0,0,0-24-24H72A24,24,0,0,0,48,56V168H24a8,8,0,0,0,0,16H64v8a24,24,0,0,0,24,24h80a24,24,0,0,0,24-24v-8h40a8,8,0,0,0,0-16Z"/>
                 </svg>
-                {status === "online" && (
-                  <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-emerald-400 rounded-full border-2 border-slate-900" />
-                )}
+                {status === "online" && <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-emerald-400 rounded-full border-2 border-slate-900" />}
               </div>
             </div>
 
             <p className="text-xs text-slate-500 mb-8 flex items-center gap-2 h-5">
               {peers.length === 0
-                ? <><SpinnerIcon />Scanning for nearby devices…</>
-                : <><span className="text-emerald-400 font-semibold">{peers.length} device{peers.length > 1 ? "s" : ""} nearby</span> — click to connect</>
+                ? isHubState
+                  ? <><span style={{ color: "#a78bfa", fontWeight: 600 }}>Hub active</span>&nbsp;— waiting for other devices</>
+                  : <><SpinnerIcon /> Scanning for nearby devices…</>
+                : isHubState
+                  ? <><span style={{ color: "#a78bfa", fontWeight: 600 }}>Hub</span>&nbsp;— {peers.length} device{peers.length > 1 ? "s" : ""} connected — click to send</>
+                  : <><span style={{ color: "#34d399", fontWeight: 600 }}>{peers.length} device{peers.length > 1 ? "s" : ""} nearby</span>&nbsp;— click to connect</>
               }
             </p>
 
             <div className="glass-panel p-8 rounded-3xl w-full max-w-md text-center">
               <p className="text-slate-400 text-sm mb-2 uppercase tracking-widest font-semibold">Your Device ID</p>
-              <div className="text-4xl font-mono font-bold text-sky-400 mb-8 tracking-widest">{myId.current}</div>
+              <div className="text-4xl font-mono font-bold text-sky-400 mb-8 tracking-widest">{myId}</div>
               <div className="space-y-4">
                 <p className="text-sm text-slate-300">Enter a peer&apos;s ID to connect directly:</p>
                 <div className="flex flex-col sm:flex-row gap-3">
-                  <input
-                    type="text"
-                    value={targetInput}
+                  <input type="text" value={targetInput}
                     onChange={(e) => setTarget(e.target.value.toUpperCase())}
                     onKeyDown={(e) => e.key === "Enter" && connectToPeer(targetInput)}
-                    placeholder="e.g. A1B2C"
-                    maxLength={5}
+                    placeholder="e.g. A1B2C" maxLength={5}
                     className="w-full sm:flex-1 min-w-0 bg-slate-900 border border-slate-600 rounded-xl px-4 py-3 text-lg font-mono uppercase text-center focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 transition-all placeholder:text-slate-600"
                   />
-                  <button
-                    disabled={connecting}
-                    onClick={() => connectToPeer(targetInput)}
-                    className="w-full sm:w-auto shrink-0 bg-sky-500 hover:bg-sky-400 text-slate-900 font-bold px-6 py-3 rounded-xl transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed sm:min-w-[130px]"
-                  >
+                  <button disabled={connecting} onClick={() => connectToPeer(targetInput)}
+                    className="w-full sm:w-auto shrink-0 bg-sky-500 hover:bg-sky-400 text-slate-900 font-bold px-6 py-3 rounded-xl transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed sm:min-w-[130px]">
                     {connecting ? <><SpinnerIcon /><span>Connecting…</span></> : <span>Connect →</span>}
                   </button>
                 </div>
@@ -495,7 +515,7 @@ export default function Page() {
             </div>
           </div>
         ) : (
-          /* ── Transfer view ── */
+          /* Transfer view */
           <div className="flex flex-col items-center w-full max-w-2xl">
             <div className="flex items-center justify-between w-full mb-8">
               <div className="flex items-center gap-3">
@@ -523,7 +543,7 @@ export default function Page() {
                 </svg>
                 <h3 className="text-xl font-semibold mb-2">Send a File</h3>
                 <p className="text-slate-400 text-sm mb-6">Unlimited size direct P2P transfer.</p>
-                <label className="bg-slate-700 hover:bg-slate-600 border border-slate-500 text-white font-semibold py-3 px-8 rounded-xl transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2 mx-auto cursor-pointer w-fit relative z-10">
+                <label className="bg-slate-700 hover:bg-slate-600 border border-slate-500 text-white font-semibold py-3 px-8 rounded-xl transition-all shadow-lg active:scale-95 inline-flex items-center justify-center gap-2 cursor-pointer relative z-10">
                   <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 256 256">
                     <path d="M245,110.64A16,16,0,0,0,232,104H216V88a24,24,0,0,0-24-24H130.67L102.94,41.6a16.05,16.05,0,0,0-9.6-3.2H48A24,24,0,0,0,24,64V208h0a8,8,0,0,0,8,8H211.1a8,8,0,0,0,7.59-5.47l28.49-85.47A16,16,0,0,0,245,110.64Z"/>
                   </svg>
@@ -532,24 +552,19 @@ export default function Page() {
                 </label>
               </div>
 
-              {/* Progress bar */}
               {progress && (
                 <div className="w-full mt-8 bg-slate-800 p-5 rounded-2xl border border-slate-600 shadow-inner relative z-10">
                   <div className="flex justify-between text-sm mb-3 font-medium">
-                    <span className="text-sky-400 flex items-center gap-2">
-                      <SpinnerIcon />{progress.label}
-                    </span>
+                    <span className="text-sky-400 flex items-center gap-2"><SpinnerIcon />{progress.label}</span>
                     <span className="text-white font-mono">{progress.pct}%</span>
                   </div>
                   <div className="w-full bg-slate-900 rounded-full h-3 overflow-hidden border border-slate-700">
-                    <div className="bg-sky-500 h-full rounded-full transition-all duration-75 ease-linear"
-                      style={{ width: `${progress.pct}%` }} />
+                    <div className="bg-sky-500 h-full rounded-full transition-all duration-75 ease-linear" style={{ width: `${progress.pct}%` }} />
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Transfer history */}
             <div className="w-full mt-8 glass-panel rounded-2xl p-6">
               <h4 className="text-sm font-semibold text-slate-300 uppercase tracking-widest mb-4 flex items-center gap-2">
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 256 256">
@@ -564,10 +579,9 @@ export default function Page() {
                     <div key={l.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-800/50 border border-slate-700">
                       <div className="flex items-center gap-3 overflow-hidden">
                         <div className={`w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center shrink-0 ${l.direction === "Sent" ? "text-sky-400" : "text-emerald-400"}`}>
-                          {l.direction === "Sent"
-                            ? <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 256 256"><path d="M200,32H163.74a47.92,47.92,0,0,0-71.48,0H56A16,16,0,0,0,40,48V216a16,16,0,0,0,16,16H200a16,16,0,0,0,16-16V48A16,16,0,0,0,200,32ZM152,88a8,8,0,0,1-16,0V56a8,8,0,0,1,16,0Z"/></svg>
-                            : <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 256 256"><path d="M200,32H163.74a47.92,47.92,0,0,0-71.48,0H56A16,16,0,0,0,40,48V216a16,16,0,0,0,16,16H200a16,16,0,0,0,16-16V48A16,16,0,0,0,200,32ZM152,88a8,8,0,0,1-16,0V56a8,8,0,0,1,16,0Z"/></svg>
-                          }
+                          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 256 256">
+                            <path d="M200,32H163.74a47.92,47.92,0,0,0-71.48,0H56A16,16,0,0,0,40,48V216a16,16,0,0,0,16,16H200a16,16,0,0,0,16-16V48A16,16,0,0,0,200,32Z"/>
+                          </svg>
                         </div>
                         <div className="min-w-0">
                           <p className="text-sm font-medium text-white truncate">{l.name}</p>
@@ -600,29 +614,22 @@ export default function Page() {
             <p className="text-slate-200 font-medium truncate mb-1 text-lg">{incomingFile.name}</p>
             <p className="text-sm text-slate-400 font-mono mb-8">{formatBytes(incomingFile.size)}</p>
             <div className="flex gap-4">
-              <button onClick={declineFile}
-                className="flex-1 bg-slate-800 hover:bg-slate-700 text-white font-semibold py-3 rounded-xl transition-all border border-slate-600 active:scale-95">
-                Decline
-              </button>
-              <button onClick={acceptFile}
-                className="flex-1 bg-sky-500 hover:bg-sky-400 text-slate-900 font-bold py-3 rounded-xl transition-all shadow-lg shadow-sky-500/20 active:scale-95">
-                Accept File
-              </button>
+              <button onClick={declineFile} className="flex-1 bg-slate-800 hover:bg-slate-700 text-white font-semibold py-3 rounded-xl transition-all border border-slate-600 active:scale-95">Decline</button>
+              <button onClick={acceptFile} className="flex-1 bg-sky-500 hover:bg-sky-400 text-slate-900 font-bold py-3 rounded-xl transition-all shadow-lg shadow-sky-500/20 active:scale-95">Accept File</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Toast container */}
+      {/* Toasts */}
       <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-3">
         {toasts.map((t) => (
-          <div key={t.id}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl border shadow-xl text-sm font-medium transition-all duration-300 ${
-              t.type === "error" ? "bg-red-950 border-red-900 text-red-100" :
-              t.type === "success" ? "bg-emerald-950 border-emerald-900 text-emerald-100" :
-              "bg-slate-800 border-slate-700 text-white"
-            }`}>
-            <span>{t.msg}</span>
+          <div key={t.id} className={`flex items-center gap-3 px-4 py-3 rounded-xl border shadow-xl text-sm font-medium ${
+            t.type === "error" ? "bg-red-950 border-red-900 text-red-100" :
+            t.type === "success" ? "bg-emerald-950 border-emerald-900 text-emerald-100" :
+            "bg-slate-800 border-slate-700 text-white"
+          }`}>
+            {t.msg}
           </div>
         ))}
       </div>
@@ -632,7 +639,7 @@ export default function Page() {
 
 function SpinnerIcon() {
   return (
-    <svg className="animate-spin w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+    <svg className="animate-spin w-4 h-4 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
     </svg>
