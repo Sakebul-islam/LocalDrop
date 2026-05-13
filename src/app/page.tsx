@@ -589,7 +589,10 @@ export default function Page() {
           <div className="flex flex-col items-center w-full">
             {/* Radar */}
             <div className="radar-container mb-4">
-              <div className="radar-circle" /><div className="radar-circle" /><div className="radar-circle" />
+              {/* Pulse rings are inside their own clipping wrapper so they never overflow the container */}
+              <div className="radar-pulse-clip">
+                <div className="radar-circle" /><div className="radar-circle" /><div className="radar-circle" />
+              </div>
               <div className="absolute rounded-full border border-dashed border-slate-700/50 pointer-events-none"
                 style={{ width: 230, height: 230, top: "50%", left: "50%", transform: "translate(-50%,-50%)" }} />
               {peers.slice(0, 8).map((id, i) => {
