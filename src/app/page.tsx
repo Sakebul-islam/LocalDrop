@@ -114,9 +114,10 @@ export default function Page() {
   const [logs, setLogs]              = useState<LogEntry[]>([]);
   const [targetInput, setTarget]     = useState("");
   const [connecting, setConnecting]  = useState(false);
-  const [incomingFile, setIncoming]  = useState<FileMeta | null>(null);
-  const [progress, setProgress]      = useState<{ pct: number; label: string } | null>(null);
-  const [isHubState, setIsHubState]  = useState(false);
+  const [incomingFile, setIncoming]   = useState<FileMeta | null>(null);
+  const [sendProgress, setSendProgress] = useState<{ pct: number; label: string } | null>(null);
+  const [recvProgress, setRecvProgress] = useState<{ pct: number; label: string } | null>(null);
+  const [isHubState, setIsHubState]   = useState(false);
 
   const toastId = useRef(0);
   const logId   = useRef(0);
@@ -131,20 +132,27 @@ export default function Page() {
     setLogs((l) => [{ id: ++logId.current, direction, name, size, url }, ...l]);
   }, []);
 
-  const showProgress = useCallback((current: number, total: number, label: string) => {
-    setProgress({ pct: Math.min(100, Math.round((current / total) * 100)), label });
+  const showSendProgress = useCallback((current: number, total: number, label: string) => {
+    setSendProgress({ pct: Math.min(100, Math.round((current / total) * 100)), label });
   }, []);
-  const hideProgress = useCallback(() => setProgress(null), []);
+  const hideSendProgress = useCallback(() => setSendProgress(null), []);
 
-  const resetConnection = useCallback(() => {
+  const showRecvProgress = useCallback((current: number, total: number, label: string) => {
+    setRecvProgress({ pct: Math.min(100, Math.round((current / total) * 100)), label });
+  }, []);
+  const hideRecvProgress = useCallback(() => setRecvProgress(null), []);
+
+  const resetConnection = useCallback((intentional = false) => {
     dc.current = null;
     pjsConnRef.current?.close();  pjsConnRef.current = null;
     rtcPcRef.current?.close();    rtcPcRef.current = null;
     if (connTimeout.current) clearTimeout(connTimeout.current);
     setConnected(null);
     setConnecting(false);
-    hideProgress();
-  }, [hideProgress]);
+    hideSendProgress();
+    hideRecvProgress();
+    if (intentional) sessionStorage.removeItem("ld_peer");
+  }, [hideSendProgress, hideRecvProgress]);
 
   // ─── Shared: incoming data handler ────────────────────────────────────────
   const handleData = useCallback(async (data: unknown) => {
@@ -173,8 +181,8 @@ export default function Page() {
           addLog("Received", meta.name, meta.size, URL.createObjectURL(blob));
           addToast(`${meta.name} ready — click Download!`, "success");
         }
-        showProgress(meta.size, meta.size, "Received ✓");
-        setTimeout(hideProgress, 1200);
+        showRecvProgress(meta.size, meta.size, "Received ✓");
+        setTimeout(hideRecvProgress, 1200);
         receiveMeta.current = null; receiveBuffer.current = []; receiveStream.current = null; receivedSize.current = 0;
       }
     } else {
@@ -189,12 +197,12 @@ export default function Page() {
           ? recvWindowBytes.current / windowSec
           : receivedSize.current / ((now - receiveStartTime.current) / 1000 || 0.001);
         if (windowSec >= 0.4) { recvWindowBytes.current = 0; recvWindowStart.current = now; }
-        showProgress(receivedSize.current, receiveMeta.current!.size, `Receiving • ${formatBytes(speed)}/s`);
+        showRecvProgress(receivedSize.current, receiveMeta.current!.size, `Receiving • ${formatBytes(speed)}/s`);
       }
       if (receiveStream.current) void receiveStream.current.write(buf);
       else receiveBuffer.current.push(buf);
     }
-  }, [addLog, addToast, hideProgress, showProgress]);
+  }, [addLog, addToast, hideRecvProgress, showRecvProgress]);
 
   // ─── Shared: high-throughput sender ───────────────────────────────────────
   async function startSendingChunks() {
@@ -203,7 +211,7 @@ export default function Page() {
     let offset = 0;
     const startTime = Date.now();
     ch.bufferedAmountLowThreshold = LOWWATER;
-    showProgress(0, file.size, "Sending • starting…");
+    showSendProgress(0, file.size, "Sending • starting…");
     let lastUI = Date.now(), windowBytes = 0, windowStart = Date.now();
 
     try {
@@ -228,21 +236,33 @@ export default function Page() {
             const windowSec = (now - windowStart) / 1000 || 0.001;
             const speed = windowSec >= 0.4 ? windowBytes / windowSec : offset / ((now - startTime) / 1000 || 0.001);
             if (windowSec >= 0.4) { windowBytes = 0; windowStart = now; }
-            showProgress(offset, file.size, `Sending • ${formatBytes(speed)}/s`);
+            showSendProgress(offset, file.size, `Sending • ${formatBytes(speed)}/s`);
           }
         }
       }
     } catch (err: unknown) {
       addToast(`Send error: ${err instanceof Error ? err.message : String(err)}`, "error");
-      hideProgress(); sendFileRef.current = null; return;
+      hideSendProgress(); sendFileRef.current = null; return;
     }
-    showProgress(file.size, file.size, "Sent ✓");
+    showSendProgress(file.size, file.size, "Sent ✓");
     ch.send(JSON.stringify({ type: "end" }));
     addToast("Transfer complete!", "success");
     addLog("Sent", file.name, file.size);
-    setTimeout(hideProgress, 1200);
+    setTimeout(hideSendProgress, 1200);
     sendFileRef.current = null;
   }
+
+  // ─── Reload protection: warn before closing when a channel is live ────────
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (dc.current) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, []);
 
   // ─── Shared: set up a raw RTCDataChannel ──────────────────────────────────
   const setupChannel = useCallback((ch: RTCDataChannel, peerId: string) => {
@@ -252,6 +272,7 @@ export default function Page() {
     ch.onclose   = () => { resetConnection(); addToast("Disconnected.", "info"); };
     ch.onerror   = () => { addToast("Connection error.", "error"); resetConnection(); };
     dc.current = ch;
+    sessionStorage.setItem("ld_peer", peerId); // persist for reload recovery
     setConnected(peerId);
     setConnecting(false);
     addToast("Connected!", "success");
@@ -287,7 +308,12 @@ export default function Page() {
       switch (msg.type) {
         case "registered":
           setMyId(msg.id as string); myIdRef.current = msg.id as string;
-          setStatus("online"); break;
+          setStatus("online");
+          {
+            const prevPeer = sessionStorage.getItem("ld_peer");
+            if (prevPeer) { sessionStorage.removeItem("ld_peer"); setTimeout(() => connectToPeer(prevPeer), 600); }
+          }
+          break;
         case "peers":
           setPeers((msg.list as string[]).filter((id) => id !== myIdRef.current)); break;
         case "peer-joined":
@@ -435,6 +461,11 @@ export default function Page() {
       p.on("open", (id: string) => {
         myIdRef.current = id; setMyId(id); setStatus("online");
         if (!lanRoomId.current) getLanRoomId().then((roomId) => tryBeHub(roomId, Peer));
+        const prevPeer = sessionStorage.getItem("ld_peer");
+        if (prevPeer) {
+          sessionStorage.removeItem("ld_peer");
+          setTimeout(() => connectToPeer(prevPeer), 600);
+        }
       });
       p.on("connection", (conn: unknown) => bindPeerConn(conn, (conn as { peer: string }).peer));
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -508,10 +539,10 @@ export default function Page() {
       }
       receivedSize.current = 0; receiveStartTime.current = Date.now(); lastReceiveUI.current = 0;
       recvWindowBytes.current = 0; recvWindowStart.current = Date.now();
-      showProgress(0, meta.size, "Receiving • connecting...");
+      showRecvProgress(0, meta.size, "Receiving • connecting...");
       dc.current?.send(JSON.stringify({ type: "accept" }));
     } catch { dc.current?.send(JSON.stringify({ type: "decline" })); }
-  }, [addToast, incomingFile, showProgress]);
+  }, [addToast, incomingFile, showRecvProgress]);
 
   const declineFile = useCallback(() => {
     setIncoming(null);
@@ -628,7 +659,7 @@ export default function Page() {
                   <p className="text-xl font-bold text-white font-mono">{connectedPeer}</p>
                 </div>
               </div>
-              <button onClick={resetConnection}
+              <button onClick={() => resetConnection(true)}
                 className="text-slate-400 hover:text-red-400 transition-colors px-4 py-2 rounded-lg hover:bg-red-400/10 text-sm font-medium border border-transparent hover:border-red-400/20">
                 Disconnect
               </button>
@@ -646,15 +677,36 @@ export default function Page() {
                   <input type="file" className="hidden" onChange={onFileSelect} />
                 </label>
               </div>
-              {progress && (
-                <div className="w-full mt-8 bg-slate-800 p-5 rounded-2xl border border-slate-600 shadow-inner relative z-10">
-                  <div className="flex justify-between text-sm mb-3 font-medium">
-                    <span className="text-sky-400 flex items-center gap-2"><SpinnerIcon />{progress.label}</span>
-                    <span className="text-white font-mono">{progress.pct}%</span>
-                  </div>
-                  <div className="w-full bg-slate-900 rounded-full h-3 overflow-hidden border border-slate-700">
-                    <div className="bg-sky-500 h-full rounded-full transition-all duration-75 ease-linear" style={{ width: `${progress.pct}%` }} />
-                  </div>
+              {(sendProgress || recvProgress) && (
+                <div className="space-y-3 mt-8 relative z-10">
+                  {sendProgress && (
+                    <div className="w-full bg-slate-800 p-5 rounded-2xl border border-sky-800/60 shadow-inner">
+                      <div className="flex justify-between text-sm mb-3 font-medium">
+                        <span className="text-sky-400 flex items-center gap-2">
+                          <SpinnerIcon />
+                          <span>↑ {sendProgress.label}</span>
+                        </span>
+                        <span className="text-white font-mono">{sendProgress.pct}%</span>
+                      </div>
+                      <div className="w-full bg-slate-900 rounded-full h-3 overflow-hidden border border-slate-700">
+                        <div className="bg-sky-500 h-full rounded-full transition-all duration-75 ease-linear" style={{ width: `${sendProgress.pct}%` }} />
+                      </div>
+                    </div>
+                  )}
+                  {recvProgress && (
+                    <div className="w-full bg-slate-800 p-5 rounded-2xl border border-emerald-800/60 shadow-inner">
+                      <div className="flex justify-between text-sm mb-3 font-medium">
+                        <span className="text-emerald-400 flex items-center gap-2">
+                          <SpinnerIcon />
+                          <span>↓ {recvProgress.label}</span>
+                        </span>
+                        <span className="text-white font-mono">{recvProgress.pct}%</span>
+                      </div>
+                      <div className="w-full bg-slate-900 rounded-full h-3 overflow-hidden border border-slate-700">
+                        <div className="bg-emerald-500 h-full rounded-full transition-all duration-75 ease-linear" style={{ width: `${recvProgress.pct}%` }} />
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
