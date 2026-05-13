@@ -964,19 +964,27 @@
           statusText.innerText = "Online (Local Mode)";
           myIdDisplay.innerText = id;
 
-          // Discover other active LocalDrop peers via PeerJS server list
-          function scanPeers() {
-            peer.listAllPeers((list) => {
+          // Discover peers via direct fetch — avoids triggering PeerJS error events
+          async function scanPeers() {
+            try {
+              const res = await fetch(
+                "https://0.peerjs.com/peerjs/peers?key=peerjs",
+                { signal: AbortSignal.timeout(4000) },
+              );
+              if (!res.ok) return;
+              const list = await res.json();
               if (!Array.isArray(list)) return;
               discoveredPeers.clear();
               list.forEach((pid) => {
                 if (pid !== myId) discoveredPeers.set(pid, { id: pid });
               });
               renderPeerMap();
-            });
+            } catch (_) {
+              /* server may not expose peer list — silently skip */
+            }
           }
           scanPeers();
-          setInterval(scanPeers, 6000);
+          setInterval(scanPeers, 8000);
         });
 
         peer.on("connection", (conn) => {
@@ -990,9 +998,26 @@
           conn.on("close", resetUI);
         });
 
-        peer.on("error", () => {
-          showToast("Connection Error. Check network.", "error");
-          resetUI();
+        peer.on("error", (err) => {
+          const type = err?.type ?? "";
+          if (type === "peer-unavailable") {
+            showToast("Device not found. Double-check the ID.", "error");
+            resetUI();
+          } else if (type === "unavailable-id") {
+            // ID collision — silently pick a new one and restart
+            myId = generateShortId();
+            myIdDisplay.innerText = myId;
+            initLocalWebRTC();
+          } else if (type === "browser-incompatible") {
+            showToast("Browser doesn't support WebRTC. Use Chrome or Firefox.", "error");
+          } else if (type === "disconnected") {
+            // Lost server connection but existing P2P links can survive — don't reset
+            showToast("Lost server connection. Reconnecting...", "info");
+          } else {
+            // network / server-error / socket-error / socket-closed
+            showToast(`Connection error (${type || "unknown"}). Check your network.`, "error");
+            if (!activeConnection) resetUI();
+          }
         });
 
         window.connectToPeer = (targetId) => {
