@@ -457,7 +457,7 @@
         const percentage = Math.min(100, Math.round((current / total) * 100));
         progressBar.style.width = `${percentage}%`;
         progressPercent.innerText = `${percentage}%`;
-        progressLabel.innerHTML = `<i class="ph ph-spinner animate-spin"></i> ${label}...`;
+        progressLabel.innerHTML = `<i class="ph ph-spinner animate-spin"></i> ${label}`;
       }
 
       function hideProgress() {
@@ -474,17 +474,19 @@
         rtcChannel.send(data);
       }
 
-      const CHUNK_SIZE = 64 * 1024; // 64KB for optimal network throughput
+      const CHUNK_SIZE = 256 * 1024; // 256KB — optimal for large file throughput
 
       // Sender State
       let sendFile = null;
       let sendOffset = 0;
+      let sendStartTime = 0;
 
       // Receiver State
       let receiveMeta = null;
       let receiveStream = null;
       let receiveBuffer = [];
       let receivedSize = 0;
+      let receiveStartTime = 0;
 
       // 1. Sender Selects File -> Send Header Request
       fileInput.addEventListener("change", () => {
@@ -502,43 +504,39 @@
         fileInput.value = "";
       });
 
-      // 2. Sender streams chunks with Backpressure Management
-      function startSendingChunks() {
+      // 2. Sender streams chunks with async/await — no recursion, proper backpressure
+      async function startSendingChunks() {
         sendOffset = 0;
+        sendStartTime = Date.now();
         const rtcChannel = activeConnection.dataChannel || activeConnection;
-        rtcChannel.bufferedAmountLowThreshold = 1024 * 1024; // 1MB threshold
+        rtcChannel.bufferedAmountLowThreshold = 4 * 1024 * 1024; // 4MB resume point
 
-        const fileReader = new FileReader();
-
-        function readNextChunk() {
-          if (sendOffset >= sendFile.size) {
-            sendDirect(JSON.stringify({ type: "end" }));
-            showToast("Transfer complete!", "success");
-            logTransfer("Sent", sendFile.name, sendFile.size);
-            hideProgress();
-            sendFile = null;
-            return;
+        while (sendOffset < sendFile.size) {
+          // BACKPRESSURE: wait for drain if WebRTC send queue exceeds 8MB
+          if (rtcChannel.bufferedAmount > 8 * 1024 * 1024) {
+            await new Promise((resolve) => {
+              rtcChannel.onbufferedamountlow = () => {
+                rtcChannel.onbufferedamountlow = null;
+                resolve();
+              };
+            });
           }
+
           const slice = sendFile.slice(sendOffset, sendOffset + CHUNK_SIZE);
-          fileReader.readAsArrayBuffer(slice);
+          const buffer = await slice.arrayBuffer();
+          sendDirect(buffer);
+          sendOffset += buffer.byteLength;
+
+          const elapsed = (Date.now() - sendStartTime) / 1000 || 0.001;
+          const speed = sendOffset / elapsed;
+          updateProgress(sendOffset, sendFile.size, `Sending &bull; ${formatBytes(speed)}/s`);
         }
 
-        fileReader.onload = (e) => {
-          sendDirect(e.target.result); // Push binary to WebRTC
-          sendOffset += e.target.result.byteLength;
-          updateProgress(sendOffset, sendFile.size, "Sending");
-
-          // BACKPRESSURE: Pause reading from disk if WebRTC queue is too full (> 2MB)
-          if (rtcChannel.bufferedAmount > 2 * 1024 * 1024) {
-            rtcChannel.onbufferedamountlow = () => {
-              rtcChannel.onbufferedamountlow = null;
-              readNextChunk();
-            };
-          } else {
-            readNextChunk();
-          }
-        };
-        readNextChunk();
+        sendDirect(JSON.stringify({ type: "end" }));
+        showToast("Transfer complete!", "success");
+        logTransfer("Sent", sendFile.name, sendFile.size);
+        hideProgress();
+        sendFile = null;
       }
 
       // 3. Central Incoming Data Router
@@ -560,38 +558,36 @@
               sendFile = null;
             } else if (msg.type === "end") {
               if (receiveStream) {
-                await receiveStream.close(); // Finish writing to hard drive
+                await receiveStream.close();
                 logTransfer("Received", receiveMeta.name, receiveMeta.size);
                 showToast(`Saved ${receiveMeta.name}!`, "success");
               } else {
-                // Fallback for Safari/Firefox
-                const blob = new Blob(receiveBuffer, {
-                  type: receiveMeta.mime,
-                });
+                // Fallback for Safari/Firefox — assemble from RAM buffer
+                const blob = new Blob(receiveBuffer, { type: receiveMeta.mime });
                 const url = URL.createObjectURL(blob);
-                logTransfer(
-                  "Received",
-                  receiveMeta.name,
-                  receiveMeta.size,
-                  url,
-                );
+                logTransfer("Received", receiveMeta.name, receiveMeta.size, url);
+                showToast(`${receiveMeta.name} ready — click Download!`, "success");
               }
               hideProgress();
               receiveMeta = null;
               receiveBuffer = [];
               receiveStream = null;
+              receivedSize = 0;
             }
           } catch (e) {}
         } else {
           // Incoming Binary Chunk
           const buffer = data instanceof Blob ? await data.arrayBuffer() : data;
           receivedSize += buffer.byteLength;
-          updateProgress(receivedSize, receiveMeta.size, "Receiving");
+
+          const elapsed = (Date.now() - receiveStartTime) / 1000 || 0.001;
+          const speed = receivedSize / elapsed;
+          updateProgress(receivedSize, receiveMeta.size, `Receiving &bull; ${formatBytes(speed)}/s`);
 
           if (receiveStream) {
-            await receiveStream.write(buffer); // Stream directly to Hard Drive
+            await receiveStream.write(buffer); // stream to disk
           } else {
-            receiveBuffer.push(buffer); // Fallback to RAM
+            receiveBuffer.push(buffer); // RAM fallback
           }
         }
       }
@@ -606,23 +602,28 @@
       acceptBtn.onclick = async () => {
         incomingModal.classList.add("hidden");
         try {
-          // Request direct file save access
           if ("showSaveFilePicker" in window) {
             const handle = await window.showSaveFilePicker({
               suggestedName: receiveMeta.name,
             });
             receiveStream = await handle.createWritable();
           } else {
-            receiveBuffer = []; // Fallback memory array
-            showToast(
-              "Streaming to disk not supported on this browser. Falling back to RAM.",
-              "info",
-            );
+            receiveBuffer = [];
+            // RAM fallback is unsafe for large files on non-Chrome browsers
+            if (receiveMeta.size > 500 * 1024 * 1024) {
+              showToast(
+                "Warning: Files over 500 MB may crash this browser. Use Chrome/Edge for large files.",
+                "error",
+              );
+            } else {
+              showToast("Direct-to-disk not supported. Buffering in RAM.", "info");
+            }
           }
           receivedSize = 0;
+          receiveStartTime = Date.now();
           sendDirect(JSON.stringify({ type: "accept" }));
         } catch (e) {
-          // User cancelled the save dialog
+          // User cancelled save dialog
           sendDirect(JSON.stringify({ type: "decline" }));
         }
       };
