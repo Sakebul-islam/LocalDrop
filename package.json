@@ -8,6 +8,7 @@
     "start": "NODE_ENV=production node server.js"
   },
   "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
     "next": "^14.2.5",
     "peerjs": "^1.5.5",
     "react": "^18.3.1",

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { CloudArrowUp, FolderOpen, Laptop } from "@phosphor-icons/react";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const CHUNK_SIZE   = 64  * 1024;
@@ -576,9 +577,7 @@ export default function Page() {
                 );
               })}
               <div className="w-20 h-20 bg-slate-800 rounded-full flex items-center justify-center z-10 shadow-xl border border-slate-600 relative">
-                <svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" fill="#cbd5e1" viewBox="0 0 256 256">
-                  <path d="M232,168H208V112a24,24,0,0,0-24-24H152V56a24,24,0,0,0-24-24H72A24,24,0,0,0,48,56V168H24a8,8,0,0,0,0,16H64v8a24,24,0,0,0,24,24h80a24,24,0,0,0,24-24v-8h40a8,8,0,0,0,0-16Z"/>
-                </svg>
+                <Laptop size={30} color="#cbd5e1" />
                 {status === "online" && <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-emerald-400 rounded-full border-2 border-slate-900" />}
               </div>
             </div>
@@ -638,15 +637,11 @@ export default function Page() {
             <div className="glass-panel w-full rounded-3xl p-8 border border-slate-700/50 relative overflow-hidden group">
               <div className="absolute inset-0 bg-sky-500/5 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
               <div className="text-center">
-                <svg xmlns="http://www.w3.org/2000/svg" className="w-16 h-16 text-sky-400 mb-4 mx-auto animate-bounce" fill="currentColor" viewBox="0 0 256 256">
-                  <path d="M248,128a87.34,87.34,0,0,1-17.6,52.81,8,8,0,1,1-12.8-9.62A71.34,71.34,0,0,0,232,128a72,72,0,0,0-144,0,8,8,0,0,1-16,0,88,88,0,0,1,176,0Zm-90.67,41.76-20,24a8,8,0,0,1-12.66,0l-20-24A8,8,0,0,1,117.33,160H120v-32a8,8,0,0,1,16,0v32h2.67A8,8,0,0,1,157.33,169.76Z"/>
-                </svg>
+                <CloudArrowUp className="w-16 h-16 text-sky-400 mb-4 mx-auto animate-bounce" weight="regular" />
                 <h3 className="text-xl font-semibold mb-2">Send a File</h3>
                 <p className="text-slate-400 text-sm mb-6">Unlimited size direct P2P transfer.</p>
                 <label className="bg-slate-700 hover:bg-slate-600 border border-slate-500 text-white font-semibold py-3 px-8 rounded-xl transition-all shadow-lg active:scale-95 inline-flex items-center justify-center gap-2 cursor-pointer relative z-10">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 256 256">
-                    <path d="M245,110.64A16,16,0,0,0,232,104H216V88a24,24,0,0,0-24-24H130.67L102.94,41.6a16.05,16.05,0,0,0-9.6-3.2H48A24,24,0,0,0,24,64V208h0a8,8,0,0,0,8,8H211.1a8,8,0,0,0,7.59-5.47l28.49-85.47A16,16,0,0,0,245,110.64Z"/>
-                  </svg>
+                  <FolderOpen size={20} weight="fill" />
                   Select File
                   <input type="file" className="hidden" onChange={onFileSelect} />
                 </label>
