@@ -778,7 +778,7 @@
         rtcChannel.send(data);
       }
 
-      const CHUNK_SIZE = 256 * 1024; // 256KB — optimal for large file throughput
+      const CHUNK_SIZE = 1024 * 1024; // 1MB — fewer awaits per GB, better throughput
 
       // Sender State
       let sendFile = null;
@@ -791,6 +791,7 @@
       let receiveBuffer = [];
       let receivedSize = 0;
       let receiveStartTime = 0;
+      let lastReceiveUI = 0;
 
       // 1. Sender Selects File -> Send Header Request
       fileInput.addEventListener("change", () => {
@@ -808,16 +809,18 @@
         fileInput.value = "";
       });
 
-      // 2. Sender streams chunks with async/await — no recursion, proper backpressure
+      // 2. High-throughput sender: parallel reads + direct sends + throttled UI
       async function startSendingChunks() {
         sendOffset = 0;
         sendStartTime = Date.now();
         const rtcChannel = activeConnection.dataChannel || activeConnection;
-        rtcChannel.bufferedAmountLowThreshold = 4 * 1024 * 1024; // 4MB resume point
+        rtcChannel.bufferedAmountLowThreshold = 8 * 1024 * 1024; // resume at 8MB
+
+        let lastUI = 0;
 
         while (sendOffset < sendFile.size) {
-          // BACKPRESSURE: wait for drain if WebRTC send queue exceeds 8MB
-          if (rtcChannel.bufferedAmount > 8 * 1024 * 1024) {
+          // Drain when send buffer exceeds 16MB
+          if (rtcChannel.bufferedAmount > 16 * 1024 * 1024) {
             await new Promise((resolve) => {
               rtcChannel.onbufferedamountlow = () => {
                 rtcChannel.onbufferedamountlow = null;
@@ -826,14 +829,26 @@
             });
           }
 
-          const slice = sendFile.slice(sendOffset, sendOffset + CHUNK_SIZE);
-          const buffer = await slice.arrayBuffer();
-          sendDirect(buffer);
-          sendOffset += buffer.byteLength;
+          // Read 4 chunks in parallel — overlaps disk/memory reads with network sends
+          const batch = [];
+          let ahead = sendOffset;
+          for (let i = 0; i < 4 && ahead < sendFile.size; i++, ahead += CHUNK_SIZE) {
+            batch.push(sendFile.slice(ahead, ahead + CHUNK_SIZE).arrayBuffer());
+          }
+          const buffers = await Promise.all(batch);
 
-          const elapsed = (Date.now() - sendStartTime) / 1000 || 0.001;
-          const speed = sendOffset / elapsed;
-          updateProgress(sendOffset, sendFile.size, `Sending &bull; ${formatBytes(speed)}/s`);
+          for (const buf of buffers) {
+            rtcChannel.send(buf); // direct — no sendDirect wrapper in the hot path
+            sendOffset += buf.byteLength;
+          }
+
+          // DOM update throttled to 100ms — prevents layout thrash from killing speed
+          const now = Date.now();
+          if (now - lastUI > 100) {
+            lastUI = now;
+            const elapsed = (now - sendStartTime) / 1000 || 0.001;
+            updateProgress(sendOffset, sendFile.size, `Sending &bull; ${formatBytes(sendOffset / elapsed)}/s`);
+          }
         }
 
         sendDirect(JSON.stringify({ type: "end" }));
@@ -884,9 +899,12 @@
           const buffer = data instanceof Blob ? await data.arrayBuffer() : data;
           receivedSize += buffer.byteLength;
 
-          const elapsed = (Date.now() - receiveStartTime) / 1000 || 0.001;
-          const speed = receivedSize / elapsed;
-          updateProgress(receivedSize, receiveMeta.size, `Receiving &bull; ${formatBytes(speed)}/s`);
+          const now = Date.now();
+          if (now - lastReceiveUI > 100) {
+            lastReceiveUI = now;
+            const elapsed = (now - receiveStartTime) / 1000 || 0.001;
+            updateProgress(receivedSize, receiveMeta.size, `Receiving &bull; ${formatBytes(receivedSize / elapsed)}/s`);
+          }
 
           if (receiveStream) {
             await receiveStream.write(buffer); // stream to disk
@@ -925,6 +943,7 @@
           }
           receivedSize = 0;
           receiveStartTime = Date.now();
+          lastReceiveUI = 0;
           sendDirect(JSON.stringify({ type: "accept" }));
         } catch (e) {
           // User cancelled save dialog
