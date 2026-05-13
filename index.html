@@ -31,11 +31,70 @@
       /* Radar Pulse Animation */
       .radar-container {
         position: relative;
-        width: 200px;
-        height: 200px;
+        width: 300px;
+        height: 300px;
         display: flex;
         justify-content: center;
         align-items: center;
+      }
+
+      .device-node {
+        position: absolute;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+        transform: translate(-50%, -50%);
+        z-index: 20;
+        cursor: pointer;
+      }
+
+      .device-node .icon-ring {
+        width: 44px;
+        height: 44px;
+        background: rgba(15, 23, 42, 0.9);
+        border: 1px solid rgba(56, 189, 248, 0.35);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s;
+        box-shadow: 0 0 12px rgba(56, 189, 248, 0.15);
+      }
+
+      .device-node:hover .icon-ring {
+        background: rgba(56, 189, 248, 0.15);
+        border-color: rgba(56, 189, 248, 0.8);
+        box-shadow: 0 0 20px rgba(56, 189, 248, 0.35);
+        transform: scale(1.12);
+      }
+
+      .device-node .node-label {
+        font-size: 10px;
+        font-family: monospace;
+        font-weight: 700;
+        color: #94a3b8;
+        background: rgba(15, 23, 42, 0.9);
+        border: 1px solid rgba(71, 85, 105, 0.5);
+        padding: 2px 6px;
+        border-radius: 4px;
+        white-space: nowrap;
+        transition: color 0.2s;
+      }
+
+      .device-node:hover .node-label {
+        color: #38bdf8;
+      }
+
+      .device-node .online-dot {
+        position: absolute;
+        top: 2px;
+        right: 2px;
+        width: 10px;
+        height: 10px;
+        background: #34d399;
+        border-radius: 50%;
+        border: 2px solid #0f172a;
       }
 
       .radar-circle {
@@ -122,16 +181,25 @@
         id="discovery-view"
         class="flex flex-col items-center w-full transition-all duration-500"
       >
-        <div class="radar-container mb-12">
+        <div class="radar-container mb-4">
           <div class="radar-circle"></div>
           <div class="radar-circle"></div>
           <div class="radar-circle"></div>
-          <div
-            class="w-24 h-24 bg-slate-800 rounded-full flex items-center justify-center z-10 shadow-lg border border-slate-700"
-          >
-            <i class="ph ph-laptop text-4xl text-slate-300"></i>
+          <!-- Orbit ring showing where peers appear -->
+          <div class="absolute rounded-full border border-dashed border-slate-700/50 pointer-events-none"
+               style="width:230px;height:230px;top:50%;left:50%;transform:translate(-50%,-50%)"></div>
+          <!-- Discovered peer nodes rendered here by JS -->
+          <div id="peer-map" class="absolute inset-0 pointer-events-none"></div>
+          <!-- This device (center) -->
+          <div class="w-20 h-20 bg-slate-800 rounded-full flex items-center justify-center z-10 shadow-xl border border-slate-600 relative">
+            <i class="ph ph-laptop text-3xl text-slate-300"></i>
+            <span class="absolute -top-1 -right-1 w-3.5 h-3.5 bg-emerald-400 rounded-full border-2 border-slate-900 hidden" id="self-online-dot"></span>
           </div>
         </div>
+        <!-- Scan status line -->
+        <p id="scan-status" class="text-xs text-slate-500 mb-8 flex items-center gap-2 h-5 transition-all">
+          <i class="ph ph-spinner animate-spin"></i> Scanning for nearby devices...
+        </p>
 
         <div class="glass-panel p-8 rounded-3xl w-full max-w-md text-center">
           <p
@@ -355,6 +423,64 @@
       let activeConnection = null;
       let nativePC = null; // Used only in Canvas Mode
       let connectionTimeout = null;
+
+      /* --- Peer Discovery Map --- */
+      let discoveredPeers = new Map(); // peerId -> { id }
+
+      function renderPeerMap() {
+        const mapEl = document.getElementById("peer-map");
+        const scanStatus = document.getElementById("scan-status");
+        const selfDot = document.getElementById("self-online-dot");
+        if (!mapEl) return;
+
+        mapEl.innerHTML = "";
+        if (selfDot) selfDot.classList.remove("hidden");
+
+        const peers = [...discoveredPeers.values()].slice(0, 8);
+
+        if (peers.length === 0) {
+          if (scanStatus)
+            scanStatus.innerHTML = `<i class="ph ph-magnifying-glass animate-pulse"></i>&nbsp; No devices found yet — waiting...`;
+          return;
+        }
+
+        if (scanStatus)
+          scanStatus.innerHTML =
+            `<i class="ph ph-cell-signal-full" style="color:#34d399"></i>&nbsp;` +
+            `<span style="color:#34d399;font-weight:600">${peers.length} device${peers.length > 1 ? "s" : ""} nearby</span>` +
+            ` — click to connect`;
+
+        const size = 300;
+        const center = size / 2;
+        const orbit = 115;
+
+        peers.forEach((peer, i) => {
+          const angle = (i / peers.length) * 2 * Math.PI - Math.PI / 2;
+          const x = center + Math.cos(angle) * orbit;
+          const y = center + Math.sin(angle) * orbit;
+
+          const node = document.createElement("button");
+          node.className = "device-node";
+          node.style.left = `${x}px`;
+          node.style.top = `${y}px`;
+          node.title = `Connect to ${peer.id}`;
+          node.innerHTML = `
+            <div class="icon-ring" style="position:relative">
+              <i class="ph ph-device-mobile" style="color:#38bdf8;font-size:18px"></i>
+              <span class="online-dot"></span>
+            </div>
+            <span class="node-label">${peer.id}</span>
+          `;
+          node.onclick = () => {
+            targetIdInput.value = peer.id;
+            connectBtn.click();
+          };
+          mapEl.appendChild(node);
+        });
+
+        mapEl.style.pointerEvents = "none"; // children handle their own events
+        mapEl.querySelectorAll(".device-node").forEach(n => n.style.pointerEvents = "auto");
+      }
 
       const isCanvas = typeof __firebase_config !== "undefined";
 
@@ -645,6 +771,7 @@
           doc,
           setDoc,
           getDoc,
+          deleteDoc,
           collection,
           onSnapshot,
           updateDoc,
@@ -672,6 +799,29 @@
           statusDot.classList.remove("animate-pulse");
           statusText.innerText = "Online (Canvas Network)";
           myIdDisplay.innerText = myId;
+
+          // Presence system — register this device and watch for others
+          const presenceCol = collection(db, "artifacts", appId, "public", "data", "presence");
+          const myPresRef = doc(presenceCol, myId);
+          await setDoc(myPresRef, { id: myId, t: Date.now() });
+          const presTimer = setInterval(
+            () => updateDoc(myPresRef, { t: Date.now() }).catch(() => {}),
+            10000,
+          );
+          window.addEventListener("beforeunload", () => {
+            clearInterval(presTimer);
+            deleteDoc(myPresRef).catch(() => {});
+          });
+          onSnapshot(presenceCol, (snap) => {
+            const now = Date.now();
+            discoveredPeers.clear();
+            snap.forEach((d) => {
+              const p = d.data();
+              if (p.id !== myId && now - p.t < 30000)
+                discoveredPeers.set(p.id, { id: p.id });
+            });
+            renderPeerMap();
+          });
 
           roomRef = doc(
             collection(
@@ -813,6 +963,20 @@
           statusDot.classList.remove("animate-pulse");
           statusText.innerText = "Online (Local Mode)";
           myIdDisplay.innerText = id;
+
+          // Discover other active LocalDrop peers via PeerJS server list
+          function scanPeers() {
+            peer.listAllPeers((list) => {
+              if (!Array.isArray(list)) return;
+              discoveredPeers.clear();
+              list.forEach((pid) => {
+                if (pid !== myId) discoveredPeers.set(pid, { id: pid });
+              });
+              renderPeerMap();
+            });
+          }
+          scanPeers();
+          setInterval(scanPeers, 6000);
         });
 
         peer.on("connection", (conn) => {
