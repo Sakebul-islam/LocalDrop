@@ -778,7 +778,7 @@
         rtcChannel.send(data);
       }
 
-      const CHUNK_SIZE = 1024 * 1024; // 1MB — fewer awaits per GB, better throughput
+      const CHUNK_SIZE = 256 * 1024; // 256KB — safe SCTP message size across all browsers
 
       // Sender State
       let sendFile = null;
@@ -809,52 +809,64 @@
         fileInput.value = "";
       });
 
-      // 2. High-throughput sender: parallel reads + direct sends + throttled UI
+      // 2. High-throughput sender: 4-chunk parallel reads, throttled UI, safe chunk size
       async function startSendingChunks() {
         sendOffset = 0;
         sendStartTime = Date.now();
         const rtcChannel = activeConnection.dataChannel || activeConnection;
-        rtcChannel.bufferedAmountLowThreshold = 8 * 1024 * 1024; // resume at 8MB
+        rtcChannel.bufferedAmountLowThreshold = 4 * 1024 * 1024; // resume at 4MB
 
-        let lastUI = 0;
+        // Show progress bar immediately at 0% before any data flows
+        updateProgress(0, sendFile.size, "Sending &bull; calculating...");
 
-        while (sendOffset < sendFile.size) {
-          // Drain when send buffer exceeds 16MB
-          if (rtcChannel.bufferedAmount > 16 * 1024 * 1024) {
-            await new Promise((resolve) => {
-              rtcChannel.onbufferedamountlow = () => {
-                rtcChannel.onbufferedamountlow = null;
-                resolve();
-              };
-            });
+        let lastUI = Date.now();
+
+        try {
+          while (sendOffset < sendFile.size) {
+            // Drain when send buffer exceeds 8MB
+            if (rtcChannel.bufferedAmount > 8 * 1024 * 1024) {
+              await new Promise((resolve) => {
+                rtcChannel.onbufferedamountlow = () => {
+                  rtcChannel.onbufferedamountlow = null;
+                  resolve();
+                };
+              });
+            }
+
+            // Read 4 × 256KB chunks in parallel (1MB per tick, safe per-message size)
+            const batch = [];
+            let ahead = sendOffset;
+            for (let i = 0; i < 4 && ahead < sendFile.size; i++, ahead += CHUNK_SIZE) {
+              batch.push(sendFile.slice(ahead, ahead + CHUNK_SIZE).arrayBuffer());
+            }
+            const buffers = await Promise.all(batch);
+
+            for (const buf of buffers) {
+              rtcChannel.send(buf);
+              sendOffset += buf.byteLength;
+            }
+
+            // Update UI every 80ms — visible feedback without layout thrash
+            const now = Date.now();
+            if (now - lastUI >= 80) {
+              lastUI = now;
+              const elapsed = (now - sendStartTime) / 1000 || 0.001;
+              updateProgress(sendOffset, sendFile.size, `Sending &bull; ${formatBytes(sendOffset / elapsed)}/s`);
+            }
           }
-
-          // Read 4 chunks in parallel — overlaps disk/memory reads with network sends
-          const batch = [];
-          let ahead = sendOffset;
-          for (let i = 0; i < 4 && ahead < sendFile.size; i++, ahead += CHUNK_SIZE) {
-            batch.push(sendFile.slice(ahead, ahead + CHUNK_SIZE).arrayBuffer());
-          }
-          const buffers = await Promise.all(batch);
-
-          for (const buf of buffers) {
-            rtcChannel.send(buf); // direct — no sendDirect wrapper in the hot path
-            sendOffset += buf.byteLength;
-          }
-
-          // DOM update throttled to 100ms — prevents layout thrash from killing speed
-          const now = Date.now();
-          if (now - lastUI > 100) {
-            lastUI = now;
-            const elapsed = (now - sendStartTime) / 1000 || 0.001;
-            updateProgress(sendOffset, sendFile.size, `Sending &bull; ${formatBytes(sendOffset / elapsed)}/s`);
-          }
+        } catch (err) {
+          showToast(`Send error: ${err.message}`, "error");
+          hideProgress();
+          sendFile = null;
+          return;
         }
 
+        // Show 100% briefly so user sees completion before bar disappears
+        updateProgress(sendFile.size, sendFile.size, "Sent ✓");
         sendDirect(JSON.stringify({ type: "end" }));
         showToast("Transfer complete!", "success");
         logTransfer("Sent", sendFile.name, sendFile.size);
-        hideProgress();
+        setTimeout(hideProgress, 1200);
         sendFile = null;
       }
 
@@ -887,7 +899,8 @@
                 logTransfer("Received", receiveMeta.name, receiveMeta.size, url);
                 showToast(`${receiveMeta.name} ready — click Download!`, "success");
               }
-              hideProgress();
+              updateProgress(receiveMeta.size, receiveMeta.size, "Received ✓");
+              setTimeout(hideProgress, 1200);
               receiveMeta = null;
               receiveBuffer = [];
               receiveStream = null;
@@ -900,7 +913,7 @@
           receivedSize += buffer.byteLength;
 
           const now = Date.now();
-          if (now - lastReceiveUI > 100) {
+          if (now - lastReceiveUI >= 80) {
             lastReceiveUI = now;
             const elapsed = (now - receiveStartTime) / 1000 || 0.001;
             updateProgress(receivedSize, receiveMeta.size, `Receiving &bull; ${formatBytes(receivedSize / elapsed)}/s`);
@@ -944,6 +957,8 @@
           receivedSize = 0;
           receiveStartTime = Date.now();
           lastReceiveUI = 0;
+          // Show bar immediately at 0% — before first chunk arrives
+          updateProgress(0, receiveMeta.size, "Receiving &bull; connecting...");
           sendDirect(JSON.stringify({ type: "accept" }));
         } catch (e) {
           // User cancelled save dialog
