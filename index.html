@@ -778,7 +778,10 @@
         rtcChannel.send(data);
       }
 
-      const CHUNK_SIZE = 256 * 1024; // 256KB — safe SCTP message size across all browsers
+      const CHUNK_SIZE   = 64  * 1024;        // 64 KB — universally safe SCTP message size
+      const SEGMENT_SIZE = 16  * 1024 * 1024; // 16 MB read per await (one yield per 16 MB)
+      const HIGHWATER    = 4   * 1024 * 1024; // pause sends when buffer exceeds 4 MB
+      const LOWWATER     = 256 * 1024;        // resume when buffer drains to 256 KB
 
       // Sender State
       let sendFile = null;
@@ -809,49 +812,46 @@
         fileInput.value = "";
       });
 
-      // 2. High-throughput sender: 4-chunk parallel reads, throttled UI, safe chunk size
+      // 2. High-throughput sender: one await per 16 MB, tight synchronous inner loop
       async function startSendingChunks() {
-        sendOffset = 0;
+        sendOffset    = 0;
         sendStartTime = Date.now();
         const rtcChannel = activeConnection.dataChannel || activeConnection;
-        rtcChannel.bufferedAmountLowThreshold = 4 * 1024 * 1024; // resume at 4MB
+        rtcChannel.bufferedAmountLowThreshold = LOWWATER;
 
-        // Show progress bar immediately at 0% before any data flows
-        updateProgress(0, sendFile.size, "Sending &bull; calculating...");
-
+        updateProgress(0, sendFile.size, "Sending &bull; starting&hellip;");
         let lastUI = Date.now();
 
         try {
           while (sendOffset < sendFile.size) {
-            // Drain when send buffer exceeds 8MB
-            if (rtcChannel.bufferedAmount > 8 * 1024 * 1024) {
-              await new Promise((resolve) => {
-                rtcChannel.onbufferedamountlow = () => {
-                  rtcChannel.onbufferedamountlow = null;
-                  resolve();
-                };
-              });
-            }
+            // Load a 16 MB segment with ONE await — then drain it without yielding
+            const segEnd  = Math.min(sendOffset + SEGMENT_SIZE, sendFile.size);
+            const segment = await sendFile.slice(sendOffset, segEnd).arrayBuffer();
+            const view    = new Uint8Array(segment); // zero-copy view
+            let   segPos  = 0;
 
-            // Read 4 × 256KB chunks in parallel (1MB per tick, safe per-message size)
-            const batch = [];
-            let ahead = sendOffset;
-            for (let i = 0; i < 4 && ahead < sendFile.size; i++, ahead += CHUNK_SIZE) {
-              batch.push(sendFile.slice(ahead, ahead + CHUNK_SIZE).arrayBuffer());
-            }
-            const buffers = await Promise.all(batch);
+            while (segPos < view.byteLength) {
+              // Yield ONLY when the RTCDataChannel send buffer is full
+              if (rtcChannel.bufferedAmount >= HIGHWATER) {
+                await new Promise((resolve) => {
+                  rtcChannel.onbufferedamountlow = () => {
+                    rtcChannel.onbufferedamountlow = null;
+                    resolve();
+                  };
+                });
+              }
 
-            for (const buf of buffers) {
-              rtcChannel.send(buf);
-              sendOffset += buf.byteLength;
-            }
+              const end = Math.min(segPos + CHUNK_SIZE, view.byteLength);
+              rtcChannel.send(view.subarray(segPos, end)); // subarray = zero-copy slice
+              sendOffset += end - segPos;
+              segPos      = end;
 
-            // Update UI every 80ms — visible feedback without layout thrash
-            const now = Date.now();
-            if (now - lastUI >= 80) {
-              lastUI = now;
-              const elapsed = (now - sendStartTime) / 1000 || 0.001;
-              updateProgress(sendOffset, sendFile.size, `Sending &bull; ${formatBytes(sendOffset / elapsed)}/s`);
+              const now = Date.now();
+              if (now - lastUI >= 80) {
+                lastUI = now;
+                const elapsed = (now - sendStartTime) / 1000 || 0.001;
+                updateProgress(sendOffset, sendFile.size, `Sending &bull; ${formatBytes(sendOffset / elapsed)}/s`);
+              }
             }
           }
         } catch (err) {
@@ -861,8 +861,7 @@
           return;
         }
 
-        // Show 100% briefly so user sees completion before bar disappears
-        updateProgress(sendFile.size, sendFile.size, "Sent ✓");
+        updateProgress(sendFile.size, sendFile.size, "Sent &#10003;");
         sendDirect(JSON.stringify({ type: "end" }));
         showToast("Transfer complete!", "success");
         logTransfer("Sent", sendFile.name, sendFile.size);
