@@ -427,6 +427,183 @@
       /* --- Peer Discovery Map --- */
       let discoveredPeers = new Map(); // peerId -> { id }
 
+      /* --- LAN Auto-Discovery (Hub / Client system) --- */
+      let lanRoomId = null;
+      let isHubMode = false;
+      let hubClientMap = new Map(); // clientId -> DataConnection  (hub only)
+      let _hubPeer = null; // Peer object that holds the room slot
+
+      // Derive a room ID from the local subnet so all devices on the same LAN
+      // produce the same ID.  Falls back to public IP (same NAT) for Chrome,
+      // which hides host IPs behind mDNS obfuscation.
+      async function getLanRoomId() {
+        return new Promise((resolve) => {
+          const pc = new RTCPeerConnection({
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+          });
+          pc.createDataChannel("x");
+          pc.createOffer()
+            .then((o) => pc.setLocalDescription(o))
+            .catch(() => resolve("LDROPNET0"));
+
+          let found = null, done = false;
+          const finish = (id) => {
+            if (!done) { done = true; pc.close(); resolve(id); }
+          };
+          setTimeout(() => finish(found || "LDROPNET0"), 4000);
+
+          const hashStr = (s) => {
+            let h = 0;
+            for (const c of s) h = (Math.imul(31, h) + c.charCodeAt(0)) | 0;
+            return "LD" + Math.abs(h).toString(36).toUpperCase().slice(0, 5);
+          };
+
+          pc.onicecandidate = ({ candidate }) => {
+            if (!candidate) { finish(found || "LDROPNET0"); return; }
+            const parts = candidate.candidate.split(" ");
+            const ip = parts[4], type = parts[7];
+            if (
+              type === "host" &&
+              /^(\d+\.){3}\d+$/.test(ip) &&
+              !ip.startsWith("127.")
+            ) {
+              // Real LAN IP — hash the /24 subnet
+              finish(hashStr(ip.split(".").slice(0, 3).join(".")));
+            } else if (
+              type === "srflx" &&
+              /^(\d+\.){3}\d+$/.test(ip) &&
+              !found
+            ) {
+              // Public IP from STUN — devices behind same NAT share this
+              found = hashStr(ip);
+              setTimeout(() => finish(found), 600);
+            }
+          };
+        });
+      }
+
+      function startLanDiscovery() {
+        if (lanRoomId) return; // already running
+        getLanRoomId().then(tryBeHub);
+      }
+
+      // --- Hub role: first device to grab the room ID ---
+      function tryBeHub(roomId) {
+        lanRoomId = roomId;
+        _hubPeer = new Peer(roomId, {
+          config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
+        });
+
+        _hubPeer.on("open", () => {
+          isHubMode = true;
+          renderPeerMap();
+          _hubPeer.on("connection", (conn) => {
+            conn.on("open", () => {
+              conn.on("data", (raw) => {
+                try {
+                  const msg = JSON.parse(raw);
+                  if (msg.type === "hello") hubOnJoin(conn, msg.id);
+                } catch (_) {}
+              });
+              conn.on("close", () => hubOnLeave(conn));
+              conn.on("error", () => hubOnLeave(conn));
+            });
+          });
+        });
+
+        _hubPeer.on("error", (err) => {
+          _hubPeer = null;
+          isHubMode = false;
+          if (err.type === "unavailable-id") {
+            joinHubAsClient(roomId); // room taken → join existing hub
+          } else {
+            setTimeout(() => tryBeHub(roomId), 3000 + Math.random() * 2000);
+          }
+        });
+      }
+
+      function hubOnJoin(conn, clientId) {
+        hubClientMap.set(clientId, conn);
+        // Send full peer list to the new client
+        const list = [myId, ...hubClientMap.keys()].filter((id) => id !== clientId);
+        conn.send(JSON.stringify({ type: "peers", list }));
+        // Notify all existing clients about the new arrival
+        hubBroadcast({ type: "join", id: clientId }, [clientId]);
+        discoveredPeers.set(clientId, { id: clientId });
+        renderPeerMap();
+      }
+
+      function hubOnLeave(conn) {
+        let leftId = null;
+        for (const [id, c] of hubClientMap) {
+          if (c === conn) { leftId = id; break; }
+        }
+        if (!leftId) return;
+        hubClientMap.delete(leftId);
+        discoveredPeers.delete(leftId);
+        renderPeerMap();
+        hubBroadcast({ type: "leave", id: leftId });
+      }
+
+      function hubBroadcast(msg, excludeIds = []) {
+        const raw = JSON.stringify(msg);
+        for (const [id, c] of hubClientMap) {
+          if (!excludeIds.includes(id)) try { c.send(raw); } catch (_) {}
+        }
+      }
+
+      // --- Client role: join the existing hub ---
+      function joinHubAsClient(roomId) {
+        const dp = new Peer(null, {
+          config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
+        });
+
+        dp.on("open", () => {
+          const conn = dp.connect(roomId, { reliable: true });
+
+          conn.on("open", () => {
+            conn.send(JSON.stringify({ type: "hello", id: myId }));
+          });
+
+          conn.on("data", (raw) => {
+            try {
+              const msg = JSON.parse(raw);
+              if (msg.type === "peers") {
+                discoveredPeers.clear();
+                msg.list
+                  .filter((id) => id !== myId)
+                  .forEach((id) => discoveredPeers.set(id, { id }));
+                renderPeerMap();
+              } else if (msg.type === "join" && msg.id !== myId) {
+                discoveredPeers.set(msg.id, { id: msg.id });
+                renderPeerMap();
+              } else if (msg.type === "leave") {
+                discoveredPeers.delete(msg.id);
+                renderPeerMap();
+              }
+            } catch (_) {}
+          });
+
+          conn.on("close", () => {
+            dp.destroy();
+            discoveredPeers.clear();
+            renderPeerMap();
+            // Hub left — race to become the new hub
+            setTimeout(() => tryBeHub(roomId), Math.random() * 2000 + 500);
+          });
+        });
+
+        dp.on("error", (err) => {
+          dp.destroy();
+          if (err.type === "peer-unavailable") {
+            // Hub just disappeared — try to grab the slot
+            setTimeout(() => tryBeHub(roomId), Math.random() * 1500 + 300);
+          } else {
+            setTimeout(() => joinHubAsClient(roomId), 3000);
+          }
+        });
+      }
+
       function renderPeerMap() {
         const mapEl = document.getElementById("peer-map");
         const scanStatus = document.getElementById("scan-status");
@@ -440,15 +617,16 @@
 
         if (peers.length === 0) {
           if (scanStatus)
-            scanStatus.innerHTML = `<i class="ph ph-magnifying-glass animate-pulse"></i>&nbsp; No devices found yet — waiting...`;
+            scanStatus.innerHTML = isHubMode
+              ? `<i class="ph ph-broadcast" style="color:#a78bfa"></i>&nbsp;<span style="color:#a78bfa;font-weight:600">Hub active</span> — waiting for other devices`
+              : `<i class="ph ph-magnifying-glass animate-pulse"></i>&nbsp; Looking for devices on your network...`;
           return;
         }
 
         if (scanStatus)
-          scanStatus.innerHTML =
-            `<i class="ph ph-cell-signal-full" style="color:#34d399"></i>&nbsp;` +
-            `<span style="color:#34d399;font-weight:600">${peers.length} device${peers.length > 1 ? "s" : ""} nearby</span>` +
-            ` — click to connect`;
+          scanStatus.innerHTML = isHubMode
+            ? `<i class="ph ph-broadcast" style="color:#a78bfa"></i>&nbsp;<span style="color:#a78bfa;font-weight:600">Hub</span> — ${peers.length} device${peers.length > 1 ? "s" : ""} connected — click to send`
+            : `<i class="ph ph-cell-signal-full" style="color:#34d399"></i>&nbsp;<span style="color:#34d399;font-weight:600">${peers.length} device${peers.length > 1 ? "s" : ""} nearby</span> — click to connect`;
 
         const size = 300;
         const center = size / 2;
@@ -964,27 +1142,7 @@
           statusText.innerText = "Online (Local Mode)";
           myIdDisplay.innerText = id;
 
-          // Discover peers via direct fetch — avoids triggering PeerJS error events
-          async function scanPeers() {
-            try {
-              const res = await fetch(
-                "https://0.peerjs.com/peerjs/peers?key=peerjs",
-                { signal: AbortSignal.timeout(4000) },
-              );
-              if (!res.ok) return;
-              const list = await res.json();
-              if (!Array.isArray(list)) return;
-              discoveredPeers.clear();
-              list.forEach((pid) => {
-                if (pid !== myId) discoveredPeers.set(pid, { id: pid });
-              });
-              renderPeerMap();
-            } catch (_) {
-              /* server may not expose peer list — silently skip */
-            }
-          }
-          scanPeers();
-          setInterval(scanPeers, 8000);
+          startLanDiscovery();
         });
 
         peer.on("connection", (conn) => {
