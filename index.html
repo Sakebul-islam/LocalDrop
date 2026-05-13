@@ -218,16 +218,16 @@
             <p class="text-sm text-slate-300">
               Enter a peer's ID to connect directly:
             </p>
-            <div class="flex gap-2">
+            <div class="flex flex-col sm:flex-row gap-3">
               <input
                 type="text"
                 id="target-id-input"
                 placeholder="e.g. A1B2C"
-                class="flex-1 bg-slate-900 border border-slate-600 rounded-xl px-4 py-3 text-lg font-mono uppercase text-center focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 transition-all placeholder:text-slate-600 uppercase"
+                class="w-full bg-slate-900 border border-slate-600 rounded-xl px-4 py-3 text-lg font-mono uppercase text-center focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 transition-all placeholder:text-slate-600"
               />
               <button
                 id="connect-btn"
-                class="bg-sky-500 hover:bg-sky-400 text-slate-900 font-bold px-6 py-3 rounded-xl transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed min-w-[120px]"
+                class="w-full sm:w-auto bg-sky-500 hover:bg-sky-400 text-slate-900 font-bold px-6 py-3 rounded-xl transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed sm:min-w-[130px]"
               >
                 Connect <i class="ph ph-arrow-right-bold"></i>
               </button>
