@@ -446,11 +446,14 @@
             .then((o) => pc.setLocalDescription(o))
             .catch(() => resolve("LDROPNET0"));
 
-          let found = null, done = false;
-          const finish = (id) => {
-            if (!done) { done = true; pc.close(); resolve(id); }
-          };
-          setTimeout(() => finish(found || "LDROPNET0"), 4000);
+          // Collect both candidate types — prefer srflx (public IP) because it
+          // is identical for EVERY device behind the same router regardless of
+          // whether they use WiFi or a LAN cable (Ethernet).  The /24 subnet
+          // hash is kept only as a last-resort fallback for offline / no-STUN
+          // scenarios, but it must NOT override a srflx result.
+          let srflxId  = null; // public IP hash  (same for WiFi + Ethernet)
+          let subnetId = null; // /24 subnet hash (may differ across adapters)
+          let done     = false;
 
           const hashStr = (s) => {
             let h = 0;
@@ -458,25 +461,39 @@
             return "LD" + Math.abs(h).toString(36).toUpperCase().slice(0, 5);
           };
 
+          const finish = (id) => {
+            if (!done) { done = true; pc.close(); resolve(id); }
+          };
+
+          // Hard deadline — use best candidate collected so far
+          setTimeout(() => finish(srflxId || subnetId || "LDROPNET0"), 4000);
+
           pc.onicecandidate = ({ candidate }) => {
-            if (!candidate) { finish(found || "LDROPNET0"); return; }
+            if (!candidate) {
+              // Gathering complete — commit immediately
+              finish(srflxId || subnetId || "LDROPNET0");
+              return;
+            }
             const parts = candidate.candidate.split(" ");
             const ip = parts[4], type = parts[7];
-            if (
+
+            if (type === "srflx" && /^(\d+\.){3}\d+$/.test(ip) && !srflxId) {
+              // Public IP via STUN — shared by all devices on the same router
+              srflxId = hashStr(ip);
+              // Wait a little longer in case a better srflx candidate arrives,
+              // then lock in regardless.
+              setTimeout(() => finish(srflxId || subnetId || "LDROPNET0"), 800);
+            } else if (
               type === "host" &&
               /^(\d+\.){3}\d+$/.test(ip) &&
-              !ip.startsWith("127.")
+              !ip.startsWith("127.") &&
+              !subnetId
             ) {
-              // Real LAN IP — hash the /24 subnet
-              finish(hashStr(ip.split(".").slice(0, 3).join(".")));
-            } else if (
-              type === "srflx" &&
-              /^(\d+\.){3}\d+$/.test(ip) &&
-              !found
-            ) {
-              // Public IP from STUN — devices behind same NAT share this
-              found = hashStr(ip);
-              setTimeout(() => finish(found), 600);
+              // Real LAN host IP — store as subnet fallback but do NOT finish
+              // yet; we still want to wait for the srflx candidate so that WiFi
+              // and Ethernet devices (possibly on different subnets) end up with
+              // the same room ID.
+              subnetId = hashStr(ip.split(".").slice(0, 3).join("."));
             }
           };
         });

@@ -32,23 +32,33 @@ async function getLanRoomId(): Promise<string> {
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pc.createDataChannel("x");
     pc.createOffer().then((o) => pc.setLocalDescription(o)).catch(() => resolve("LDROPNET0"));
-    let found: string | null = null, done = false;
-    const finish = (id: string) => { if (!done) { done = true; pc.close(); resolve(id); } };
-    setTimeout(() => finish(found ?? "LDROPNET0"), 4000);
+
+    // Prefer srflx (public IP from STUN) — identical for every device behind
+    // the same router whether they use WiFi or Ethernet.  subnet hash is only
+    // used as a last-resort fallback so wired and wireless peers always agree.
+    let srflxId:  string | null = null;
+    let subnetId: string | null = null;
+    let done = false;
+
     const hash = (s: string) => {
       let h = 0;
       for (const c of s) h = (Math.imul(31, h) + c.charCodeAt(0)) | 0;
       return "LD" + Math.abs(h).toString(36).toUpperCase().slice(0, 5);
     };
+    const finish = (id: string) => { if (!done) { done = true; pc.close(); resolve(id); } };
+
+    setTimeout(() => finish(srflxId ?? subnetId ?? "LDROPNET0"), 4000);
+
     pc.onicecandidate = ({ candidate }) => {
-      if (!candidate) { finish(found ?? "LDROPNET0"); return; }
+      if (!candidate) { finish(srflxId ?? subnetId ?? "LDROPNET0"); return; }
       const parts = candidate.candidate.split(" ");
       const ip = parts[4], type = parts[7];
-      if (type === "host" && /^(\d+\.){3}\d+$/.test(ip) && !ip.startsWith("127."))
-        finish(hash(ip.split(".").slice(0, 3).join(".")));
-      else if (type === "srflx" && /^(\d+\.){3}\d+$/.test(ip) && !found) {
-        found = hash(ip);
-        setTimeout(() => finish(found!), 600);
+      if (type === "srflx" && /^(\d+\.){3}\d+$/.test(ip) && !srflxId) {
+        srflxId = hash(ip);
+        setTimeout(() => finish(srflxId ?? subnetId ?? "LDROPNET0"), 800);
+      } else if (type === "host" && /^(\d+\.){3}\d+$/.test(ip) && !ip.startsWith("127.") && !subnetId) {
+        // Store as fallback only — do NOT finish() yet so srflx can still arrive
+        subnetId = hash(ip.split(".").slice(0, 3).join("."));
       }
     };
   });
