@@ -1,0 +1,1256 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LocalDrop - P2P File Transfer</title>
+
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- PeerJS for WebRTC fallback (used when downloaded locally) -->
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+
+    <!-- Phosphor Icons -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+
+    <!-- Google Fonts -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+
+    <style>
+      body {
+        font-family: "Inter", sans-serif;
+        background-color: #0f172a; /* slate-900 */
+        color: #f8fafc;
+        overflow-x: hidden;
+      }
+
+      /* Radar Pulse Animation */
+      .radar-container {
+        position: relative;
+        width: 300px;
+        height: 300px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+
+      .device-node {
+        position: absolute;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+        transform: translate(-50%, -50%);
+        z-index: 20;
+        cursor: pointer;
+      }
+
+      .device-node .icon-ring {
+        width: 44px;
+        height: 44px;
+        background: rgba(15, 23, 42, 0.9);
+        border: 1px solid rgba(56, 189, 248, 0.35);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s;
+        box-shadow: 0 0 12px rgba(56, 189, 248, 0.15);
+      }
+
+      .device-node:hover .icon-ring {
+        background: rgba(56, 189, 248, 0.15);
+        border-color: rgba(56, 189, 248, 0.8);
+        box-shadow: 0 0 20px rgba(56, 189, 248, 0.35);
+        transform: scale(1.12);
+      }
+
+      .device-node .node-label {
+        font-size: 10px;
+        font-family: monospace;
+        font-weight: 700;
+        color: #94a3b8;
+        background: rgba(15, 23, 42, 0.9);
+        border: 1px solid rgba(71, 85, 105, 0.5);
+        padding: 2px 6px;
+        border-radius: 4px;
+        white-space: nowrap;
+        transition: color 0.2s;
+      }
+
+      .device-node:hover .node-label {
+        color: #38bdf8;
+      }
+
+      .device-node .online-dot {
+        position: absolute;
+        top: 2px;
+        right: 2px;
+        width: 10px;
+        height: 10px;
+        background: #34d399;
+        border-radius: 50%;
+        border: 2px solid #0f172a;
+      }
+
+      .radar-circle {
+        position: absolute;
+        border-radius: 50%;
+        background: rgba(56, 189, 248, 0.1);
+        border: 1px solid rgba(56, 189, 248, 0.3);
+        animation: pulse 3s infinite cubic-bezier(0.215, 0.61, 0.355, 1);
+        opacity: 0;
+        width: 100%;
+        height: 100%;
+      }
+
+      .radar-circle:nth-child(2) {
+        animation-delay: 1s;
+      }
+      .radar-circle:nth-child(3) {
+        animation-delay: 2s;
+      }
+
+      @keyframes pulse {
+        0% {
+          transform: scale(0.5);
+          opacity: 0;
+        }
+        50% {
+          opacity: 1;
+        }
+        100% {
+          transform: scale(1.5);
+          opacity: 0;
+        }
+      }
+
+      .glass-panel {
+        background: rgba(30, 41, 59, 0.7);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+      }
+
+      /* Custom Scrollbar */
+      ::-webkit-scrollbar {
+        width: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #1e293b;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #475569;
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #64748b;
+      }
+    </style>
+  </head>
+  <body
+    class="min-h-screen flex flex-col antialiased selection:bg-sky-500 selection:text-white"
+  >
+    <header class="w-full p-6 flex justify-between items-center z-10 relative">
+      <div class="flex items-center gap-2">
+        <i class="ph-fill ph-paper-plane-tilt text-3xl text-sky-400"></i>
+        <h1 class="text-2xl font-bold tracking-tight">
+          Local<span class="text-sky-400">Drop</span>
+        </h1>
+      </div>
+      <div
+        class="flex items-center gap-3 glass-panel px-4 py-2 rounded-full text-sm font-medium"
+      >
+        <div
+          id="status-dot"
+          class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"
+        ></div>
+        <span id="status-text">Connecting...</span>
+      </div>
+    </header>
+
+    <main
+      class="flex-1 flex flex-col items-center justify-center p-4 z-10 relative w-full max-w-4xl mx-auto"
+    >
+      <!-- Discovery View -->
+      <div
+        id="discovery-view"
+        class="flex flex-col items-center w-full transition-all duration-500"
+      >
+        <div class="radar-container mb-4">
+          <div class="radar-circle"></div>
+          <div class="radar-circle"></div>
+          <div class="radar-circle"></div>
+          <!-- Orbit ring showing where peers appear -->
+          <div class="absolute rounded-full border border-dashed border-slate-700/50 pointer-events-none"
+               style="width:230px;height:230px;top:50%;left:50%;transform:translate(-50%,-50%)"></div>
+          <!-- Discovered peer nodes rendered here by JS -->
+          <div id="peer-map" class="absolute inset-0 pointer-events-none"></div>
+          <!-- This device (center) -->
+          <div class="w-20 h-20 bg-slate-800 rounded-full flex items-center justify-center z-10 shadow-xl border border-slate-600 relative">
+            <i class="ph ph-laptop text-3xl text-slate-300"></i>
+            <span class="absolute -top-1 -right-1 w-3.5 h-3.5 bg-emerald-400 rounded-full border-2 border-slate-900 hidden" id="self-online-dot"></span>
+          </div>
+        </div>
+        <!-- Scan status line -->
+        <p id="scan-status" class="text-xs text-slate-500 mb-8 flex items-center gap-2 h-5 transition-all">
+          <i class="ph ph-spinner animate-spin"></i> Scanning for nearby devices...
+        </p>
+
+        <div class="glass-panel p-8 rounded-3xl w-full max-w-md text-center">
+          <p
+            class="text-slate-400 text-sm mb-2 uppercase tracking-widest font-semibold"
+          >
+            Your Device ID
+          </p>
+          <div
+            class="text-4xl font-mono font-bold text-sky-400 mb-8 tracking-widest"
+            id="my-id-display"
+          >
+            ---
+          </div>
+
+          <div class="space-y-4">
+            <p class="text-sm text-slate-300">
+              Enter a peer's ID to connect directly:
+            </p>
+            <div class="flex flex-col sm:flex-row gap-3">
+              <input
+                type="text"
+                id="target-id-input"
+                placeholder="e.g. A1B2C"
+                class="w-full bg-slate-900 border border-slate-600 rounded-xl px-4 py-3 text-lg font-mono uppercase text-center focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 transition-all placeholder:text-slate-600"
+              />
+              <button
+                id="connect-btn"
+                class="w-full sm:w-auto bg-sky-500 hover:bg-sky-400 text-slate-900 font-bold px-6 py-3 rounded-xl transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed sm:min-w-[130px]"
+              >
+                Connect <i class="ph ph-arrow-right-bold"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Connected Transfer View -->
+      <div
+        id="transfer-view"
+        class="hidden flex-col items-center w-full transition-all duration-500 w-full max-w-2xl"
+      >
+        <div class="flex items-center justify-between w-full mb-8">
+          <div class="flex items-center gap-3">
+            <div
+              class="w-12 h-12 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center border border-emerald-500/30"
+            >
+              <i class="ph ph-check-circle text-2xl"></i>
+            </div>
+            <div>
+              <p
+                class="text-slate-400 text-xs uppercase tracking-wider font-semibold"
+              >
+                Connected to
+              </p>
+              <p
+                class="text-xl font-bold text-white font-mono"
+                id="connected-peer-id"
+              >
+                ---
+              </p>
+            </div>
+          </div>
+          <button
+            id="disconnect-btn"
+            class="text-slate-400 hover:text-red-400 transition-colors px-4 py-2 rounded-lg hover:bg-red-400/10 text-sm font-medium border border-transparent hover:border-red-400/20"
+          >
+            Disconnect
+          </button>
+        </div>
+
+        <div
+          class="glass-panel w-full rounded-3xl p-8 border border-slate-700/50 relative overflow-hidden group"
+        >
+          <div
+            class="absolute inset-0 bg-sky-500/5 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+          ></div>
+          <div class="text-center">
+            <i
+              class="ph ph-cloud-arrow-up text-6xl text-sky-400 mb-4 inline-block animate-bounce"
+            ></i>
+            <h3 class="text-xl font-semibold mb-2">Send a File</h3>
+            <p class="text-slate-400 text-sm mb-6">
+              Unlimited size direct P2P transfer.
+            </p>
+
+            <input type="file" id="file-input" class="hidden" />
+            <button
+              onclick="document.getElementById('file-input').click()"
+              class="bg-slate-700 hover:bg-slate-600 border border-slate-500 text-white font-semibold py-3 px-8 rounded-xl transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2 mx-auto relative z-10"
+            >
+              <i class="ph ph-folder-open text-xl"></i> Select File
+            </button>
+          </div>
+
+          <!-- Live Progress Bar -->
+          <div
+            id="progress-ui"
+            class="hidden w-full mt-8 bg-slate-800 p-5 rounded-2xl border border-slate-600 shadow-inner relative z-10"
+          >
+            <div class="flex justify-between text-sm mb-3 font-medium">
+              <span
+                id="progress-label"
+                class="text-sky-400 flex items-center gap-2"
+                ><i class="ph ph-spinner animate-spin"></i>
+                Transferring...</span
+              >
+              <span id="progress-percent" class="text-white font-mono">0%</span>
+            </div>
+            <div
+              class="w-full bg-slate-900 rounded-full h-3 overflow-hidden border border-slate-700"
+            >
+              <div
+                id="progress-bar"
+                class="bg-sky-500 h-full rounded-full transition-all duration-75 ease-linear"
+                style="width: 0%"
+              ></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="w-full mt-8 glass-panel rounded-2xl p-6">
+          <h4
+            class="text-sm font-semibold text-slate-300 uppercase tracking-widest mb-4 flex items-center gap-2"
+          >
+            <i class="ph ph-clock-counter-clockwise"></i> Transfer History
+          </h4>
+          <div
+            id="transfer-logs"
+            class="space-y-3 max-h-48 overflow-y-auto pr-2"
+          >
+            <div class="text-slate-500 text-sm italic text-center py-4">
+              No files transferred yet.
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Incoming File Modal Overlay -->
+    <div
+      id="incoming-modal"
+      class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-md p-4 transition-opacity"
+    >
+      <div
+        class="glass-panel p-8 rounded-3xl w-full max-w-sm text-center border border-slate-600 shadow-2xl"
+      >
+        <div
+          class="w-20 h-20 bg-sky-500/20 text-sky-400 rounded-full flex items-center justify-center mx-auto mb-5 border border-sky-500/30"
+        >
+          <i class="ph ph-file-arrow-down text-4xl animate-bounce"></i>
+        </div>
+        <h3 class="text-2xl font-bold mb-2 text-white">Incoming File</h3>
+        <p
+          id="incoming-filename"
+          class="text-slate-200 font-medium truncate mb-1 text-lg"
+        >
+          filename.mp4
+        </p>
+        <p id="incoming-size" class="text-sm text-slate-400 font-mono mb-8">
+          3.2 GB
+        </p>
+        <div class="flex gap-4">
+          <button
+            id="decline-btn"
+            class="flex-1 bg-slate-800 hover:bg-slate-700 text-white font-semibold py-3 rounded-xl transition-all border border-slate-600 active:scale-95"
+          >
+            Decline
+          </button>
+          <button
+            id="accept-btn"
+            class="flex-1 bg-sky-500 hover:bg-sky-400 text-slate-900 font-bold py-3 rounded-xl transition-all shadow-lg shadow-sky-500/20 active:scale-95"
+          >
+            Accept File
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      id="toast-container"
+      class="fixed bottom-6 right-6 z-50 flex flex-col gap-3"
+    ></div>
+
+    <script type="module">
+      // Generate a 5-character alphanumeric ID
+      function generateShortId() {
+        const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let result = "";
+        for (let i = 0; i < 5; i++) {
+          result += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        return result;
+      }
+
+      /* --- Global State & UI Elements --- */
+      const statusDot = document.getElementById("status-dot");
+      const statusText = document.getElementById("status-text");
+      const myIdDisplay = document.getElementById("my-id-display");
+      const targetIdInput = document.getElementById("target-id-input");
+      const connectBtn = document.getElementById("connect-btn");
+      const discoveryView = document.getElementById("discovery-view");
+      const transferView = document.getElementById("transfer-view");
+      const connectedPeerIdDisplay =
+        document.getElementById("connected-peer-id");
+      const disconnectBtn = document.getElementById("disconnect-btn");
+      const fileInput = document.getElementById("file-input");
+      const transferLogs = document.getElementById("transfer-logs");
+
+      const progressUi = document.getElementById("progress-ui");
+      const progressBar = document.getElementById("progress-bar");
+      const progressPercent = document.getElementById("progress-percent");
+      const progressLabel = document.getElementById("progress-label");
+
+      const incomingModal = document.getElementById("incoming-modal");
+      const incomingFilename = document.getElementById("incoming-filename");
+      const incomingSize = document.getElementById("incoming-size");
+      const acceptBtn = document.getElementById("accept-btn");
+      const declineBtn = document.getElementById("decline-btn");
+
+      let myId = generateShortId();
+      let activeConnection = null;
+      let nativePC = null; // Used only in Canvas Mode
+      let connectionTimeout = null;
+
+      /* --- Peer Discovery Map --- */
+      let discoveredPeers = new Map(); // peerId -> { id }
+
+      /* --- LAN Auto-Discovery (Hub / Client system) --- */
+      let lanRoomId = null;
+      let isHubMode = false;
+      let hubClientMap = new Map(); // clientId -> DataConnection  (hub only)
+      let _hubPeer = null; // Peer object that holds the room slot
+
+      // Derive a room ID from the local subnet so all devices on the same LAN
+      // produce the same ID.  Falls back to public IP (same NAT) for Chrome,
+      // which hides host IPs behind mDNS obfuscation.
+      async function getLanRoomId() {
+        return new Promise((resolve) => {
+          const pc = new RTCPeerConnection({
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+          });
+          pc.createDataChannel("x");
+          pc.createOffer()
+            .then((o) => pc.setLocalDescription(o))
+            .catch(() => resolve("LDROPNET0"));
+
+          let found = null, done = false;
+          const finish = (id) => {
+            if (!done) { done = true; pc.close(); resolve(id); }
+          };
+          setTimeout(() => finish(found || "LDROPNET0"), 4000);
+
+          const hashStr = (s) => {
+            let h = 0;
+            for (const c of s) h = (Math.imul(31, h) + c.charCodeAt(0)) | 0;
+            return "LD" + Math.abs(h).toString(36).toUpperCase().slice(0, 5);
+          };
+
+          pc.onicecandidate = ({ candidate }) => {
+            if (!candidate) { finish(found || "LDROPNET0"); return; }
+            const parts = candidate.candidate.split(" ");
+            const ip = parts[4], type = parts[7];
+            if (
+              type === "host" &&
+              /^(\d+\.){3}\d+$/.test(ip) &&
+              !ip.startsWith("127.")
+            ) {
+              // Real LAN IP — hash the /24 subnet
+              finish(hashStr(ip.split(".").slice(0, 3).join(".")));
+            } else if (
+              type === "srflx" &&
+              /^(\d+\.){3}\d+$/.test(ip) &&
+              !found
+            ) {
+              // Public IP from STUN — devices behind same NAT share this
+              found = hashStr(ip);
+              setTimeout(() => finish(found), 600);
+            }
+          };
+        });
+      }
+
+      function startLanDiscovery() {
+        if (lanRoomId) return; // already running
+        getLanRoomId().then(tryBeHub);
+      }
+
+      // --- Hub role: first device to grab the room ID ---
+      function tryBeHub(roomId) {
+        lanRoomId = roomId;
+        _hubPeer = new Peer(roomId, {
+          config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
+        });
+
+        _hubPeer.on("open", () => {
+          isHubMode = true;
+          renderPeerMap();
+          _hubPeer.on("connection", (conn) => {
+            conn.on("open", () => {
+              conn.on("data", (raw) => {
+                try {
+                  const msg = JSON.parse(raw);
+                  if (msg.type === "hello") hubOnJoin(conn, msg.id);
+                } catch (_) {}
+              });
+              conn.on("close", () => hubOnLeave(conn));
+              conn.on("error", () => hubOnLeave(conn));
+            });
+          });
+        });
+
+        _hubPeer.on("error", (err) => {
+          _hubPeer = null;
+          isHubMode = false;
+          if (err.type === "unavailable-id") {
+            joinHubAsClient(roomId); // room taken → join existing hub
+          } else {
+            setTimeout(() => tryBeHub(roomId), 3000 + Math.random() * 2000);
+          }
+        });
+      }
+
+      function hubOnJoin(conn, clientId) {
+        hubClientMap.set(clientId, conn);
+        // Send full peer list to the new client
+        const list = [myId, ...hubClientMap.keys()].filter((id) => id !== clientId);
+        conn.send(JSON.stringify({ type: "peers", list }));
+        // Notify all existing clients about the new arrival
+        hubBroadcast({ type: "join", id: clientId }, [clientId]);
+        discoveredPeers.set(clientId, { id: clientId });
+        renderPeerMap();
+      }
+
+      function hubOnLeave(conn) {
+        let leftId = null;
+        for (const [id, c] of hubClientMap) {
+          if (c === conn) { leftId = id; break; }
+        }
+        if (!leftId) return;
+        hubClientMap.delete(leftId);
+        discoveredPeers.delete(leftId);
+        renderPeerMap();
+        hubBroadcast({ type: "leave", id: leftId });
+      }
+
+      function hubBroadcast(msg, excludeIds = []) {
+        const raw = JSON.stringify(msg);
+        for (const [id, c] of hubClientMap) {
+          if (!excludeIds.includes(id)) try { c.send(raw); } catch (_) {}
+        }
+      }
+
+      // --- Client role: join the existing hub ---
+      function joinHubAsClient(roomId) {
+        const dp = new Peer(null, {
+          config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
+        });
+
+        dp.on("open", () => {
+          const conn = dp.connect(roomId, { reliable: true });
+
+          conn.on("open", () => {
+            conn.send(JSON.stringify({ type: "hello", id: myId }));
+          });
+
+          conn.on("data", (raw) => {
+            try {
+              const msg = JSON.parse(raw);
+              if (msg.type === "peers") {
+                discoveredPeers.clear();
+                msg.list
+                  .filter((id) => id !== myId)
+                  .forEach((id) => discoveredPeers.set(id, { id }));
+                renderPeerMap();
+              } else if (msg.type === "join" && msg.id !== myId) {
+                discoveredPeers.set(msg.id, { id: msg.id });
+                renderPeerMap();
+              } else if (msg.type === "leave") {
+                discoveredPeers.delete(msg.id);
+                renderPeerMap();
+              }
+            } catch (_) {}
+          });
+
+          conn.on("close", () => {
+            dp.destroy();
+            discoveredPeers.clear();
+            renderPeerMap();
+            // Hub left — race to become the new hub
+            setTimeout(() => tryBeHub(roomId), Math.random() * 2000 + 500);
+          });
+        });
+
+        dp.on("error", (err) => {
+          dp.destroy();
+          if (err.type === "peer-unavailable") {
+            // Hub just disappeared — try to grab the slot
+            setTimeout(() => tryBeHub(roomId), Math.random() * 1500 + 300);
+          } else {
+            setTimeout(() => joinHubAsClient(roomId), 3000);
+          }
+        });
+      }
+
+      function renderPeerMap() {
+        const mapEl = document.getElementById("peer-map");
+        const scanStatus = document.getElementById("scan-status");
+        const selfDot = document.getElementById("self-online-dot");
+        if (!mapEl) return;
+
+        mapEl.innerHTML = "";
+        if (selfDot) selfDot.classList.remove("hidden");
+
+        const peers = [...discoveredPeers.values()].slice(0, 8);
+
+        if (peers.length === 0) {
+          if (scanStatus)
+            scanStatus.innerHTML = isHubMode
+              ? `<i class="ph ph-broadcast" style="color:#a78bfa"></i>&nbsp;<span style="color:#a78bfa;font-weight:600">Hub active</span> — waiting for other devices`
+              : `<i class="ph ph-magnifying-glass animate-pulse"></i>&nbsp; Looking for devices on your network...`;
+          return;
+        }
+
+        if (scanStatus)
+          scanStatus.innerHTML = isHubMode
+            ? `<i class="ph ph-broadcast" style="color:#a78bfa"></i>&nbsp;<span style="color:#a78bfa;font-weight:600">Hub</span> — ${peers.length} device${peers.length > 1 ? "s" : ""} connected — click to send`
+            : `<i class="ph ph-cell-signal-full" style="color:#34d399"></i>&nbsp;<span style="color:#34d399;font-weight:600">${peers.length} device${peers.length > 1 ? "s" : ""} nearby</span> — click to connect`;
+
+        const size = 300;
+        const center = size / 2;
+        const orbit = 115;
+
+        peers.forEach((peer, i) => {
+          const angle = (i / peers.length) * 2 * Math.PI - Math.PI / 2;
+          const x = center + Math.cos(angle) * orbit;
+          const y = center + Math.sin(angle) * orbit;
+
+          const node = document.createElement("button");
+          node.className = "device-node";
+          node.style.left = `${x}px`;
+          node.style.top = `${y}px`;
+          node.title = `Connect to ${peer.id}`;
+          node.innerHTML = `
+            <div class="icon-ring" style="position:relative">
+              <i class="ph ph-device-mobile" style="color:#38bdf8;font-size:18px"></i>
+              <span class="online-dot"></span>
+            </div>
+            <span class="node-label">${peer.id}</span>
+          `;
+          node.onclick = () => {
+            targetIdInput.value = peer.id;
+            connectBtn.click();
+          };
+          mapEl.appendChild(node);
+        });
+
+        mapEl.style.pointerEvents = "none"; // children handle their own events
+        mapEl.querySelectorAll(".device-node").forEach(n => n.style.pointerEvents = "auto");
+      }
+
+      const isCanvas = typeof __firebase_config !== "undefined";
+
+      /* --- UI Helper Functions --- */
+      function showToast(message, type = "info") {
+        const container = document.getElementById("toast-container");
+        const toast = document.createElement("div");
+
+        let bgClass = "bg-slate-800 border-slate-700 text-white";
+        let icon = '<i class="ph-fill ph-info text-sky-400"></i>';
+        if (type === "error") {
+          bgClass = "bg-red-950 border-red-900 text-red-100";
+          icon = '<i class="ph-fill ph-warning-circle text-red-400"></i>';
+        } else if (type === "success") {
+          bgClass = "bg-emerald-950 border-emerald-900 text-emerald-100";
+          icon = '<i class="ph-fill ph-check-circle text-emerald-400"></i>';
+        }
+
+        toast.className = `flex items-center gap-3 px-4 py-3 rounded-xl border shadow-xl transform transition-all duration-300 translate-y-10 opacity-0 ${bgClass}`;
+        toast.innerHTML = `${icon} <span class="text-sm font-medium">${message}</span>`;
+        container.appendChild(toast);
+
+        requestAnimationFrame(() =>
+          toast.classList.remove("translate-y-10", "opacity-0"),
+        );
+        setTimeout(() => {
+          toast.classList.add("translate-y-10", "opacity-0");
+          setTimeout(() => toast.remove(), 300);
+        }, 3000);
+      }
+
+      function showTransferUI(peerId) {
+        discoveryView.classList.add("hidden");
+        transferView.classList.remove("hidden");
+        transferView.classList.add("flex");
+        connectedPeerIdDisplay.innerText = peerId;
+        connectBtn.disabled = false;
+        connectBtn.innerHTML = 'Connect <i class="ph ph-arrow-right-bold"></i>';
+      }
+
+      function resetUI() {
+        if (activeConnection && activeConnection.close)
+          activeConnection.close();
+        if (nativePC) nativePC.close();
+        activeConnection = null;
+        nativePC = null;
+        clearTimeout(connectionTimeout);
+
+        discoveryView.classList.remove("hidden");
+        transferView.classList.add("hidden");
+        transferView.classList.remove("flex");
+        targetIdInput.value = "";
+        connectedPeerIdDisplay.innerText = "---";
+        connectBtn.disabled = false;
+        connectBtn.innerHTML = 'Connect <i class="ph ph-arrow-right-bold"></i>';
+        hideProgress();
+        incomingModal.classList.add("hidden");
+      }
+
+      function formatBytes(bytes) {
+        if (!+bytes) return "0 Bytes";
+        const k = 1024,
+          i = Math.floor(Math.log(bytes) / Math.log(k));
+        return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${["Bytes", "KB", "MB", "GB", "TB"][i]}`;
+      }
+
+      function logTransfer(direction, name, size, downloadUrl = null) {
+        const emptyMsg = transferLogs.querySelector(".italic");
+        if (emptyMsg) emptyMsg.remove();
+
+        const logItem = document.createElement("div");
+        logItem.className =
+          "flex items-center justify-between p-3 rounded-lg bg-slate-800/50 border border-slate-700";
+        const iconColor =
+          direction === "Sent" ? "text-sky-400" : "text-emerald-400";
+        const iconType =
+          direction === "Sent" ? "ph-arrow-up-right" : "ph-arrow-down-left";
+
+        let actionButton = downloadUrl
+          ? `<a href="${downloadUrl}" download="${name}" class="bg-emerald-500 hover:bg-emerald-400 text-slate-900 px-3 py-1 text-xs font-bold rounded-md transition-colors shadow-sm">Download</a>`
+          : '<span class="text-xs text-slate-500 font-bold bg-slate-800 px-2 py-1 rounded">Saved to Disk</span>';
+
+        logItem.innerHTML = `
+                <div class="flex items-center gap-3 overflow-hidden">
+                    <div class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center shrink-0">
+                        <i class="ph-bold ${iconType} ${iconColor}"></i>
+                    </div>
+                    <div class="min-w-0">
+                        <p class="text-sm font-medium text-white truncate">${name}</p>
+                        <p class="text-xs text-slate-400">${direction} • ${formatBytes(size)}</p>
+                    </div>
+                </div>
+                <div>${actionButton}</div>
+            `;
+        transferLogs.prepend(logItem);
+      }
+
+      function updateProgress(current, total, label) {
+        progressUi.classList.remove("hidden");
+        const percentage = Math.min(100, Math.round((current / total) * 100));
+        progressBar.style.width = `${percentage}%`;
+        progressPercent.innerText = `${percentage}%`;
+        progressLabel.innerHTML = `<i class="ph ph-spinner animate-spin"></i> ${label}`;
+      }
+
+      function hideProgress() {
+        progressUi.classList.add("hidden");
+        progressBar.style.width = "0%";
+        progressPercent.innerText = "0%";
+      }
+
+      /* --- Big Data Unified Transfer Architecture --- */
+
+      // Use raw RTCDataChannel directly to bypass overhead and access buffers
+      function sendDirect(data) {
+        const rtcChannel = activeConnection.dataChannel || activeConnection;
+        rtcChannel.send(data);
+      }
+
+      const CHUNK_SIZE   = 64  * 1024;        // 64 KB — universally safe SCTP message size
+      const SEGMENT_SIZE = 16  * 1024 * 1024; // 16 MB read per await (one yield per 16 MB)
+      const HIGHWATER    = 4   * 1024 * 1024; // pause sends when buffer exceeds 4 MB
+      const LOWWATER     = 256 * 1024;        // resume when buffer drains to 256 KB
+
+      // Sender State
+      let sendFile = null;
+      let sendOffset = 0;
+      let sendStartTime = 0;
+
+      // Receiver State
+      let receiveMeta = null;
+      let receiveStream = null;
+      let receiveBuffer = [];
+      let receivedSize = 0;
+      let receiveStartTime = 0;
+      let lastReceiveUI = 0;
+
+      // 1. Sender Selects File -> Send Header Request
+      fileInput.addEventListener("change", () => {
+        sendFile = fileInput.files[0];
+        if (!sendFile || !activeConnection) return;
+        showToast(`Awaiting permission to send ${sendFile.name}...`, "info");
+        sendDirect(
+          JSON.stringify({
+            type: "header",
+            name: sendFile.name,
+            size: sendFile.size,
+            mime: sendFile.type,
+          }),
+        );
+        fileInput.value = "";
+      });
+
+      // 2. High-throughput sender: one await per 16 MB, tight synchronous inner loop
+      async function startSendingChunks() {
+        sendOffset    = 0;
+        sendStartTime = Date.now();
+        const rtcChannel = activeConnection.dataChannel || activeConnection;
+        rtcChannel.bufferedAmountLowThreshold = LOWWATER;
+
+        updateProgress(0, sendFile.size, "Sending &bull; starting&hellip;");
+        let lastUI = Date.now();
+
+        try {
+          while (sendOffset < sendFile.size) {
+            // Load a 16 MB segment with ONE await — then drain it without yielding
+            const segEnd  = Math.min(sendOffset + SEGMENT_SIZE, sendFile.size);
+            const segment = await sendFile.slice(sendOffset, segEnd).arrayBuffer();
+            const view    = new Uint8Array(segment); // zero-copy view
+            let   segPos  = 0;
+
+            while (segPos < view.byteLength) {
+              // Yield ONLY when the RTCDataChannel send buffer is full
+              if (rtcChannel.bufferedAmount >= HIGHWATER) {
+                await new Promise((resolve) => {
+                  rtcChannel.onbufferedamountlow = () => {
+                    rtcChannel.onbufferedamountlow = null;
+                    resolve();
+                  };
+                });
+              }
+
+              const end = Math.min(segPos + CHUNK_SIZE, view.byteLength);
+              rtcChannel.send(view.subarray(segPos, end)); // subarray = zero-copy slice
+              sendOffset += end - segPos;
+              segPos      = end;
+
+              const now = Date.now();
+              if (now - lastUI >= 80) {
+                lastUI = now;
+                const elapsed = (now - sendStartTime) / 1000 || 0.001;
+                updateProgress(sendOffset, sendFile.size, `Sending &bull; ${formatBytes(sendOffset / elapsed)}/s`);
+              }
+            }
+          }
+        } catch (err) {
+          showToast(`Send error: ${err.message}`, "error");
+          hideProgress();
+          sendFile = null;
+          return;
+        }
+
+        updateProgress(sendFile.size, sendFile.size, "Sent &#10003;");
+        sendDirect(JSON.stringify({ type: "end" }));
+        showToast("Transfer complete!", "success");
+        logTransfer("Sent", sendFile.name, sendFile.size);
+        setTimeout(hideProgress, 1200);
+        sendFile = null;
+      }
+
+      // 3. Central Incoming Data Router
+      async function handleIncomingData(data) {
+        if (typeof data === "string") {
+          try {
+            const msg = JSON.parse(data);
+
+            if (msg.type === "header") {
+              receiveMeta = msg;
+              incomingFilename.innerText = msg.name;
+              incomingSize.innerText = formatBytes(msg.size);
+              incomingModal.classList.remove("hidden");
+            } else if (msg.type === "accept") {
+              showToast("Request accepted! Sending data...", "success");
+              startSendingChunks();
+            } else if (msg.type === "decline") {
+              showToast("Peer declined the file.", "error");
+              sendFile = null;
+            } else if (msg.type === "end") {
+              if (receiveStream) {
+                await receiveStream.close();
+                logTransfer("Received", receiveMeta.name, receiveMeta.size);
+                showToast(`Saved ${receiveMeta.name}!`, "success");
+              } else {
+                // Fallback for Safari/Firefox — assemble from RAM buffer
+                const blob = new Blob(receiveBuffer, { type: receiveMeta.mime });
+                const url = URL.createObjectURL(blob);
+                logTransfer("Received", receiveMeta.name, receiveMeta.size, url);
+                showToast(`${receiveMeta.name} ready — click Download!`, "success");
+              }
+              updateProgress(receiveMeta.size, receiveMeta.size, "Received ✓");
+              setTimeout(hideProgress, 1200);
+              receiveMeta = null;
+              receiveBuffer = [];
+              receiveStream = null;
+              receivedSize = 0;
+            }
+          } catch (e) {}
+        } else {
+          // Incoming Binary Chunk
+          const buffer = data instanceof Blob ? await data.arrayBuffer() : data;
+          receivedSize += buffer.byteLength;
+
+          const now = Date.now();
+          if (now - lastReceiveUI >= 80) {
+            lastReceiveUI = now;
+            const elapsed = (now - receiveStartTime) / 1000 || 0.001;
+            updateProgress(receivedSize, receiveMeta.size, `Receiving &bull; ${formatBytes(receivedSize / elapsed)}/s`);
+          }
+
+          if (receiveStream) {
+            await receiveStream.write(buffer); // stream to disk
+          } else {
+            receiveBuffer.push(buffer); // RAM fallback
+          }
+        }
+      }
+
+      // 4. Receiver Modal Buttons
+      declineBtn.onclick = () => {
+        incomingModal.classList.add("hidden");
+        sendDirect(JSON.stringify({ type: "decline" }));
+        receiveMeta = null;
+      };
+
+      acceptBtn.onclick = async () => {
+        incomingModal.classList.add("hidden");
+        try {
+          if ("showSaveFilePicker" in window) {
+            const handle = await window.showSaveFilePicker({
+              suggestedName: receiveMeta.name,
+            });
+            receiveStream = await handle.createWritable();
+          } else {
+            receiveBuffer = [];
+            // RAM fallback is unsafe for large files on non-Chrome browsers
+            if (receiveMeta.size > 500 * 1024 * 1024) {
+              showToast(
+                "Warning: Files over 500 MB may crash this browser. Use Chrome/Edge for large files.",
+                "error",
+              );
+            } else {
+              showToast("Direct-to-disk not supported. Buffering in RAM.", "info");
+            }
+          }
+          receivedSize = 0;
+          receiveStartTime = Date.now();
+          lastReceiveUI = 0;
+          // Show bar immediately at 0% — before first chunk arrives
+          updateProgress(0, receiveMeta.size, "Receiving &bull; connecting...");
+          sendDirect(JSON.stringify({ type: "accept" }));
+        } catch (e) {
+          // User cancelled save dialog
+          sendDirect(JSON.stringify({ type: "decline" }));
+        }
+      };
+
+      /* --- WebRTC Initializers (Unchanged Core, just binds new raw handler) --- */
+
+      async function initCanvasWebRTC() {
+        const { initializeApp } =
+          await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js");
+        const {
+          getAuth,
+          signInAnonymously,
+          signInWithCustomToken,
+          onAuthStateChanged,
+        } =
+          await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js");
+        const {
+          getFirestore,
+          doc,
+          setDoc,
+          getDoc,
+          deleteDoc,
+          collection,
+          onSnapshot,
+          updateDoc,
+          arrayUnion,
+        } =
+          await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
+
+        const app = initializeApp(JSON.parse(__firebase_config));
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId =
+          typeof __app_id !== "undefined" ? __app_id : "default-app-id";
+
+        let roomRef = null;
+        let isHost = true;
+        let processedCandidates = new Set();
+
+        if (typeof __initial_auth_token !== "undefined" && __initial_auth_token)
+          await signInWithCustomToken(auth, __initial_auth_token);
+        else await signInAnonymously(auth);
+
+        onAuthStateChanged(auth, async (user) => {
+          if (!user) return;
+          statusDot.classList.replace("bg-amber-400", "bg-emerald-400");
+          statusDot.classList.remove("animate-pulse");
+          statusText.innerText = "Online (Canvas Network)";
+          myIdDisplay.innerText = myId;
+
+          // Presence system — register this device and watch for others
+          const presenceCol = collection(db, "artifacts", appId, "public", "data", "presence");
+          const myPresRef = doc(presenceCol, myId);
+          await setDoc(myPresRef, { id: myId, t: Date.now() });
+          const presTimer = setInterval(
+            () => updateDoc(myPresRef, { t: Date.now() }).catch(() => {}),
+            10000,
+          );
+          window.addEventListener("beforeunload", () => {
+            clearInterval(presTimer);
+            deleteDoc(myPresRef).catch(() => {});
+          });
+          onSnapshot(presenceCol, (snap) => {
+            const now = Date.now();
+            discoveredPeers.clear();
+            snap.forEach((d) => {
+              const p = d.data();
+              if (p.id !== myId && now - p.t < 30000)
+                discoveredPeers.set(p.id, { id: p.id });
+            });
+            renderPeerMap();
+          });
+
+          roomRef = doc(
+            collection(
+              db,
+              "artifacts",
+              appId,
+              "public",
+              "data",
+              "webrtc_rooms",
+            ),
+            myId,
+          );
+          await setDoc(roomRef, {
+            createdAt: Date.now(),
+            hostAnswer: null,
+            guestOffer: null,
+            hostCandidates: [],
+            guestCandidates: [],
+          });
+
+          onSnapshot(roomRef, async (snapshot) => {
+            const data = snapshot.data();
+            if (!data) return;
+
+            if (data.guestOffer && !data.hostAnswer && !nativePC) {
+              isHost = true;
+              setupNativePC(roomRef, isHost, updateDoc, arrayUnion);
+              nativePC.ondatachannel = (event) => {
+                activeConnection = event.channel;
+                setupDataChannel(activeConnection, "Guest");
+              };
+              await nativePC.setRemoteDescription(
+                new RTCSessionDescription(JSON.parse(data.guestOffer)),
+              );
+              const answer = await nativePC.createAnswer();
+              await nativePC.setLocalDescription(answer);
+              await updateDoc(roomRef, { hostAnswer: JSON.stringify(answer) });
+            }
+
+            if (
+              nativePC &&
+              nativePC.remoteDescription &&
+              data.guestCandidates
+            ) {
+              for (const cand of data.guestCandidates) {
+                if (!processedCandidates.has(cand)) {
+                  processedCandidates.add(cand);
+                  await nativePC.addIceCandidate(
+                    new RTCIceCandidate(JSON.parse(cand)),
+                  );
+                }
+              }
+            }
+          });
+        });
+
+        window.connectToPeer = async (targetId) => {
+          isHost = false;
+          roomRef = doc(
+            collection(
+              db,
+              "artifacts",
+              appId,
+              "public",
+              "data",
+              "webrtc_rooms",
+            ),
+            targetId,
+          );
+          const snap = await getDoc(roomRef);
+          if (!snap.exists()) {
+            showToast("Device not found", "error");
+            resetUI();
+            return;
+          }
+
+          setupNativePC(roomRef, isHost, updateDoc, arrayUnion);
+          activeConnection = nativePC.createDataChannel("file-transfer", {
+            reliable: true,
+          });
+          setupDataChannel(activeConnection, targetId);
+
+          const offer = await nativePC.createOffer();
+          await nativePC.setLocalDescription(offer);
+          await updateDoc(roomRef, { guestOffer: JSON.stringify(offer) });
+
+          onSnapshot(roomRef, async (snapshot) => {
+            const data = snapshot.data();
+            if (!data) return;
+            if (data.hostAnswer && !nativePC.currentRemoteDescription)
+              await nativePC.setRemoteDescription(
+                new RTCSessionDescription(JSON.parse(data.hostAnswer)),
+              );
+            if (nativePC && nativePC.remoteDescription && data.hostCandidates) {
+              for (const cand of data.hostCandidates) {
+                if (!processedCandidates.has(cand)) {
+                  processedCandidates.add(cand);
+                  await nativePC.addIceCandidate(
+                    new RTCIceCandidate(JSON.parse(cand)),
+                  );
+                }
+              }
+            }
+          });
+        };
+
+        function setupNativePC(rRef, hostFlag, uDoc, aUnion) {
+          nativePC = new RTCPeerConnection({
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+          });
+          nativePC.onicecandidate = (event) => {
+            if (event.candidate)
+              uDoc(rRef, {
+                [hostFlag ? "hostCandidates" : "guestCandidates"]: aUnion(
+                  JSON.stringify(event.candidate.toJSON()),
+                ),
+              });
+          };
+        }
+
+        function setupDataChannel(channel, peerName) {
+          channel.onopen = () => {
+            clearTimeout(connectionTimeout);
+            showToast(`Connected!`, "success");
+            showTransferUI(peerName);
+          };
+          channel.onmessage = (event) => handleIncomingData(event.data);
+          channel.onclose = () => resetUI();
+        }
+      }
+
+      function initLocalWebRTC() {
+        const peer = new Peer(myId, {
+          config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
+        });
+
+        peer.on("open", (id) => {
+          statusDot.classList.replace("bg-amber-400", "bg-emerald-400");
+          statusDot.classList.remove("animate-pulse");
+          statusText.innerText = "Online (Local Mode)";
+          myIdDisplay.innerText = id;
+
+          startLanDiscovery();
+        });
+
+        peer.on("connection", (conn) => {
+          activeConnection = conn;
+          conn.on("open", () => {
+            clearTimeout(connectionTimeout);
+            showTransferUI(conn.peer);
+            // Bypass PeerJS wrapper for raw performance
+            conn.dataChannel.onmessage = (e) => handleIncomingData(e.data);
+          });
+          conn.on("close", resetUI);
+        });
+
+        peer.on("error", (err) => {
+          const type = err?.type ?? "";
+          if (type === "peer-unavailable") {
+            showToast("Device not found. Double-check the ID.", "error");
+            resetUI();
+          } else if (type === "unavailable-id") {
+            // ID collision — silently pick a new one and restart
+            myId = generateShortId();
+            myIdDisplay.innerText = myId;
+            initLocalWebRTC();
+          } else if (type === "browser-incompatible") {
+            showToast("Browser doesn't support WebRTC. Use Chrome or Firefox.", "error");
+          } else if (type === "disconnected") {
+            // Lost server connection but existing P2P links can survive — don't reset
+            showToast("Lost server connection. Reconnecting...", "info");
+          } else {
+            // network / server-error / socket-error / socket-closed
+            showToast(`Connection error (${type || "unknown"}). Check your network.`, "error");
+            if (!activeConnection) resetUI();
+          }
+        });
+
+        window.connectToPeer = (targetId) => {
+          activeConnection = peer.connect(targetId, { reliable: true });
+          activeConnection.on("open", () => {
+            clearTimeout(connectionTimeout);
+            showTransferUI(targetId);
+            activeConnection.dataChannel.onmessage = (e) =>
+              handleIncomingData(e.data);
+          });
+          activeConnection.on("close", resetUI);
+        };
+      }
+
+      connectBtn.addEventListener("click", () => {
+        const targetId = targetIdInput.value.trim().toUpperCase();
+        if (!targetId || targetId === myId) {
+          showToast("Invalid Device ID", "error");
+          return;
+        }
+
+        connectBtn.disabled = true;
+        connectBtn.innerHTML =
+          '<i class="ph ph-spinner animate-spin text-xl"></i> Connecting...';
+
+        connectionTimeout = setTimeout(() => {
+          if (
+            !activeConnection ||
+            (activeConnection.readyState !== "open" && !activeConnection.open)
+          ) {
+            showToast("Connection timed out.", "error");
+            resetUI();
+          }
+        }, 15000);
+
+        window.connectToPeer(targetId);
+      });
+
+      disconnectBtn.addEventListener("click", resetUI);
+
+      if (isCanvas) initCanvasWebRTC();
+      else initLocalWebRTC();
+    </script>
+  </body>
+</html>

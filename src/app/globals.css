@@ -1,0 +1,113 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #0f172a;
+  color: #f8fafc;
+  overflow-x: hidden;
+}
+
+.radar-container {
+  position: relative;
+  width: 300px;
+  height: 300px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.device-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  transform: translate(-50%, -50%);
+  z-index: 20;
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.device-node .icon-ring {
+  width: 44px;
+  height: 44px;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.15);
+  position: relative;
+}
+
+.device-node:hover .icon-ring {
+  background: rgba(56, 189, 248, 0.15);
+  border-color: rgba(56, 189, 248, 0.8);
+  box-shadow: 0 0 20px rgba(56, 189, 248, 0.35);
+  transform: scale(1.12);
+}
+
+.device-node .node-label {
+  font-size: 10px;
+  font-family: monospace;
+  font-weight: 700;
+  color: #94a3b8;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(71, 85, 105, 0.5);
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  transition: color 0.2s;
+}
+
+.device-node:hover .node-label {
+  color: #38bdf8;
+}
+
+.online-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 10px;
+  height: 10px;
+  background: #34d399;
+  border-radius: 50%;
+  border: 2px solid #0f172a;
+}
+
+.radar-circle {
+  position: absolute;
+  border-radius: 50%;
+  background: rgba(56, 189, 248, 0.1);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  animation: radarPulse 3s infinite cubic-bezier(0.215, 0.61, 0.355, 1);
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.radar-circle:nth-child(2) { animation-delay: 1s; }
+.radar-circle:nth-child(3) { animation-delay: 2s; }
+
+@keyframes radarPulse {
+  0%   { transform: scale(0.5); opacity: 0; }
+  50%  { opacity: 1; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+
+.glass-panel {
+  background: rgba(30, 41, 59, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+}
+
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: #1e293b; }
+::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #64748b; }
